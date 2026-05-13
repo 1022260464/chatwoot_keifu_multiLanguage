@@ -21,13 +21,19 @@ class CustomerSupportAgent:
     async def open_conversation(self, conversation_id: str) -> None:
         await self._chatwoot.open_conversation(conversation_id)
 
-    async def handle_message(self, message: IncomingMessage) -> AgentResult:
+    async def send_private_note(self, conversation_id: str, content: str) -> None:
+        await self._chatwoot.send_private_note(conversation_id, content)
+
+    async def send_public_reply(self, conversation_id: str, content: str) -> None:
+        await self._chatwoot.send_public_reply(conversation_id, content)
+
+    async def handle_message(self, message: IncomingMessage, send_public_reply: bool = True) -> AgentResult:
         state = AgentState(message=message)
 
         state = await self._intent_router(state)
         state = await self._execute_domain_node(state)
         state = await self._confidence_guard(state)
-        state = await self._finalize_action(state)
+        state = await self._finalize_action(state, send_public_reply=send_public_reply)
 
         action = AgentAction(
             type="handoff" if state.needs_human else "reply",
@@ -90,12 +96,13 @@ class CustomerSupportAgent:
 
         return state
 
-    async def _finalize_action(self, state: AgentState) -> AgentState:
+    async def _finalize_action(self, state: AgentState, send_public_reply: bool = True) -> AgentState:
         if state.needs_human:
             state.private_note = await self._llm.summarize_handoff(state.message, state.handoff_reason)
             state.draft_reply = state.draft_reply or "这个问题需要人工客服进一步确认，我已经帮你转接。"
             await self._chatwoot.handoff_to_human(state.message.conversation_id, state.private_note)
             return state
 
-        await self._chatwoot.send_public_reply(state.message.conversation_id, state.draft_reply)
+        if send_public_reply:
+            await self._chatwoot.send_public_reply(state.message.conversation_id, state.draft_reply)
         return state

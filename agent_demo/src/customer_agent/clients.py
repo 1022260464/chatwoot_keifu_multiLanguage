@@ -43,6 +43,10 @@ class ChatwootGateway(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def send_private_note(self, conversation_id: str, content: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def handoff_to_human(self, conversation_id: str, private_note: str) -> None:
         raise NotImplementedError
 
@@ -228,6 +232,9 @@ class NullChatwootClient(ChatwootGateway):
         return None
 
     async def send_public_reply(self, conversation_id: str, content: str) -> None:
+        return None
+
+    async def send_private_note(self, conversation_id: str, content: str) -> None:
         return None
 
     async def handoff_to_human(self, conversation_id: str, private_note: str) -> None:

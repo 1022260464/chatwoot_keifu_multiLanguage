@@ -34,11 +34,14 @@ class ChatwootClient(ChatwootGateway):
     async def send_public_reply(self, conversation_id: str, content: str) -> None:
         await self._send_message(conversation_id, content, is_private=False)
 
+    async def send_private_note(self, conversation_id: str, content: str) -> None:
+        await self._send_message(conversation_id, content, is_private=True)
+
     async def handoff_to_human(self, conversation_id: str, private_note: str) -> None:
         await self.open_conversation(conversation_id)
         if self._default_assignee_id:
             await self._assign_conversation(conversation_id, self._default_assignee_id)
-        await self._send_message(conversation_id, private_note, is_private=True)
+        await self.send_private_note(conversation_id, private_note)
 
     async def _send_message(self, conversation_id: str, content: str, is_private: bool) -> None:
         payload = {

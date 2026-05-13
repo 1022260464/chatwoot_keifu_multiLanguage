@@ -8,11 +8,17 @@ from urllib import request
 from urllib.error import HTTPError, URLError
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import FastAPI, Request
 
 from customer_agent.config import Settings
 from customer_agent.factory import build_agent
 from customer_agent.schemas import IncomingMessage
+from customer_agent.translator import (
+    PrivateNoteTranslator,
+    contains_chinese,
+    get_translation_skip_reason,
+    guess_language,
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -24,13 +30,46 @@ SYNC_EVENTS = {
     "conversation_updated",
     "message_created",
     "message_updated",
+    "conversation_opened",
     "webwidget_triggered",
 }
 
 settings = Settings()
 agent = build_agent(settings)
+translator = PrivateNoteTranslator(settings)
+conversation_languages: dict[str, str] = {}
+conversation_locks: dict[str, asyncio.Lock] = {}
 
 app = FastAPI(title="Chatwoot DeepSeek Agent Gateway")
+
+
+def _spawn_task(coro: Any, task_name: str) -> None:
+    task = asyncio.create_task(coro)
+    task.add_done_callback(lambda done: _log_task_result(done, task_name))
+
+
+def _log_task_result(task: asyncio.Task[Any], task_name: str) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.warning("Background task was cancelled task=%s", task_name)
+    except Exception:
+        logger.exception("Background task failed task=%s", task_name)
+
+
+async def handle_incoming_message_task(payload: dict[str, Any], incoming_message: IncomingMessage) -> None:
+    conversation_id = incoming_message.conversation_id
+    async with _conversation_lock(conversation_id):
+        await translate_private_note_task(payload)
+        await process_message_task(incoming_message)
+
+
+def _conversation_lock(conversation_id: str) -> asyncio.Lock:
+    lock = conversation_locks.get(conversation_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        conversation_locks[conversation_id] = lock
+    return lock
 
 
 async def process_message_task(incoming_message: IncomingMessage) -> None:
@@ -39,7 +78,39 @@ async def process_message_task(incoming_message: IncomingMessage) -> None:
         if settings.chatwoot_open_on_incoming:
             await agent.open_conversation(incoming_message.conversation_id)
 
-        result = await agent.handle_message(incoming_message)
+        user_language = await _resolve_user_language(incoming_message)
+        should_translate_reply = (
+            settings.translation_outgoing_enabled
+            and user_language
+            and not _is_chinese_language(user_language)
+        )
+        result = await agent.handle_message(
+            incoming_message,
+            send_public_reply=not should_translate_reply,
+        )
+
+        if should_translate_reply and result.action.type == "reply":
+            translated_reply = await asyncio.wait_for(
+                translator.translate(result.reply, target=user_language),
+                timeout=settings.translation_timeout_seconds,
+            )
+            if translated_reply:
+                await agent.send_public_reply(incoming_message.conversation_id, translated_reply)
+                await agent.send_private_note(
+                    incoming_message.conversation_id,
+                    f"[Original AI reply]\n{result.reply}",
+                )
+                logger.info(
+                    "Sent translated Agent reply conversation_id=%s target_language=%s",
+                    incoming_message.conversation_id,
+                    user_language,
+                )
+            else:
+                logger.warning(
+                    "Translated Agent reply was empty; original reply was not sent conversation_id=%s",
+                    incoming_message.conversation_id,
+                )
+
         logger.info(
             "Processed Chatwoot conversation_id=%s intent=%s action=%s",
             result.conversation_id,
@@ -51,6 +122,113 @@ async def process_message_task(incoming_message: IncomingMessage) -> None:
             "Failed to process Chatwoot conversation_id=%s",
             incoming_message.conversation_id,
         )
+
+
+async def translate_private_note_task(payload: dict[str, Any]) -> None:
+    content = str(payload.get("content") or "").strip()
+    if not _is_contact_incoming_message(payload):
+        logger.info(
+            "Translation skipped because payload is not a public contact incoming message: "
+            "event=%s message_type=%s private=%s sender_type=%s",
+            payload.get("event"),
+            payload.get("message_type"),
+            payload.get("private"),
+            _extract_sender_type(payload) or "unknown",
+        )
+        return
+
+    conversation_id = _extract_conversation_id(payload)
+    if not conversation_id:
+        logger.warning("Translation skipped because conversation_id is missing")
+        return
+
+    try:
+        if settings.translation_private_note_enabled or settings.translation_outgoing_enabled:
+            detected_language = await asyncio.wait_for(
+                translator.detect_language(content),
+                timeout=settings.translation_timeout_seconds,
+            )
+            if detected_language:
+                conversation_languages[conversation_id] = detected_language
+                logger.info(
+                    "Detected conversation language conversation_id=%s language=%s",
+                    conversation_id,
+                    detected_language,
+                )
+
+        skip_reason = get_translation_skip_reason(content, settings)
+        if skip_reason:
+            logger.info("Translation skipped reason=%s", skip_reason)
+            return
+
+        translated_text = await asyncio.wait_for(
+            translator.translate_to_target(content),
+            timeout=settings.translation_timeout_seconds,
+        )
+        if not translated_text:
+            logger.warning("Translation skipped because translated text is empty")
+            return
+
+        await agent.send_private_note(
+            conversation_id,
+            f"[AI translation]\n{translated_text}",
+        )
+        logger.info("Sent translation private note conversation_id=%s", conversation_id)
+    except TimeoutError:
+        logger.warning("Translation timed out conversation_id=%s", conversation_id)
+    except Exception:
+        logger.exception("Failed to create translation private note conversation_id=%s", conversation_id)
+
+
+async def translate_outgoing_to_user_language_task(payload: dict[str, Any]) -> None:
+    if not settings.translation_outgoing_enabled:
+        return
+
+    if not _is_translatable_outgoing_message(payload):
+        return
+
+    content = str(payload.get("content") or "").strip()
+    if not contains_chinese(content):
+        return
+
+    conversation_id = _extract_conversation_id(payload)
+    if not conversation_id:
+        logger.warning("Outgoing translation skipped because conversation_id is missing")
+        return
+
+    target_language = conversation_languages.get(conversation_id) or settings.translation_default_user_lang
+    if not target_language:
+        logger.info("Outgoing translation skipped because no user language is known")
+        return
+
+    if target_language.lower() in ("zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant"):
+        logger.info("Outgoing translation skipped because target language is Chinese")
+        return
+
+    try:
+        translated_text = await asyncio.wait_for(
+            translator.translate(content, target=target_language),
+            timeout=settings.translation_timeout_seconds,
+        )
+        if not translated_text:
+            logger.warning("Outgoing translation skipped because translated text is empty")
+            return
+
+        if not payload.get("private"):
+            await agent.send_private_note(
+                conversation_id,
+                f"[Auto translated to {target_language}]\n{translated_text}",
+            )
+        await agent.send_public_reply(conversation_id, translated_text)
+        logger.info(
+            "Sent outgoing translation conversation_id=%s target_language=%s",
+            conversation_id,
+            target_language,
+        )
+    except TimeoutError:
+        logger.warning("Outgoing translation timed out conversation_id=%s", conversation_id)
+    except Exception:
+        logger.exception("Failed to translate outgoing message conversation_id=%s", conversation_id)
 
 
 async def sync_chatwoot_event_task(payload: dict[str, Any]) -> None:
@@ -79,7 +257,6 @@ async def health() -> dict[str, str]:
 @app.post("/webhook/chatwoot")
 async def chatwoot_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
     try:
         payload = await request.json()
@@ -92,11 +269,12 @@ async def chatwoot_webhook(
         logger.info("Ignored unsupported Chatwoot event=%s", event or "unknown")
         return {"status": "ignored", "reason": "Unsupported event"}
 
-    background_tasks.add_task(sync_chatwoot_event_task, payload)
+    _spawn_task(sync_chatwoot_event_task(payload), "sync_chatwoot_event")
 
     agent_ignore_reason = _get_agent_ignore_reason(payload)
     if agent_ignore_reason:
         logger.info("Skipped Agent processing reason=%s", agent_ignore_reason)
+        _spawn_task(translate_outgoing_to_user_language_task(payload), "translate_outgoing")
         return {"status": "synced", "agent": "skipped", "reason": agent_ignore_reason}
 
     incoming_message = _to_incoming_message(payload)
@@ -110,7 +288,7 @@ async def chatwoot_webhook(
         incoming_message.contact_id,
         incoming_message.content[:40],
     )
-    background_tasks.add_task(process_message_task, incoming_message)
+    _spawn_task(handle_incoming_message_task(payload, incoming_message), "handle_incoming_message")
     return {"status": "synced", "agent": "queued"}
 
 
@@ -128,6 +306,59 @@ def _get_agent_ignore_reason(payload: dict[str, Any]) -> str:
         return "Empty content"
 
     return ""
+
+
+def _is_contact_incoming_message(payload: dict[str, Any]) -> bool:
+    sender_type = _extract_sender_type(payload).lower()
+    if payload.get("event") != "message_created":
+        return False
+
+    # Chatwoot's incoming message_type is the reliable signal for visitor
+    # messages. Some webhook payloads omit sender.type, so treat unknown sender
+    # type as acceptable here while still rejecting user/bot outgoing messages.
+    if payload.get("message_type") != "incoming":
+        return False
+
+    if payload.get("private"):
+        return False
+
+    if sender_type and sender_type not in ("contact", "contact_inbox", "unknown"):
+        return False
+
+    return bool(str(payload.get("content") or "").strip())
+
+
+def _is_public_outgoing_message(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("event") == "message_created"
+        and payload.get("message_type") == "outgoing"
+        and not payload.get("private")
+        and bool(str(payload.get("content") or "").strip())
+    )
+
+
+def _is_translatable_outgoing_message(payload: dict[str, Any]) -> bool:
+    if payload.get("event") != "message_created":
+        return False
+
+    if payload.get("message_type") != "outgoing":
+        return False
+
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        return False
+
+    # Do not translate notes created by this gateway, otherwise private-note
+    # audit messages can become public replies and create confusing duplicates.
+    system_prefixes = (
+        "[AI translation]",
+        "[Original AI reply]",
+        "[Auto translated to",
+    )
+    if any(content.startswith(prefix) for prefix in system_prefixes):
+        return False
+
+    return True
 
 
 def _to_incoming_message(payload: dict[str, Any]) -> IncomingMessage | None:
@@ -162,6 +393,7 @@ def _to_incoming_message(payload: dict[str, Any]) -> IncomingMessage | None:
             "chatwoot_message_id": payload.get("id"),
             "chatwoot_inbox_id": payload.get("inbox_id"),
             "chatwoot_account_id": payload.get("account", {}).get("id"),
+            "user_language": guess_language(content),
         },
     )
 
@@ -237,6 +469,47 @@ async def _forward_to_admin_backend(payload: dict[str, Any]) -> None:
 def _extract_conversation_id(payload: dict[str, Any]) -> str:
     conversation = payload.get("conversation") or {}
     return _string_id(conversation.get("id") or payload.get("conversation_id"))
+
+
+def _extract_sender_type(payload: dict[str, Any]) -> str:
+    sender = payload.get("sender") or {}
+    return _string_id(sender.get("type") or payload.get("sender_type"))
+
+
+async def _resolve_user_language(message: IncomingMessage) -> str:
+    known_language = conversation_languages.get(message.conversation_id)
+    if known_language:
+        return known_language
+
+    guessed_language = str(message.metadata.get("user_language") or "")
+    if guessed_language:
+        conversation_languages[message.conversation_id] = guessed_language
+        return guessed_language
+
+    if not settings.translation_outgoing_enabled:
+        return ""
+
+    try:
+        detected_language = await asyncio.wait_for(
+            translator.detect_language(message.content),
+            timeout=settings.translation_timeout_seconds,
+        )
+    except TimeoutError:
+        logger.warning("Language detection timed out conversation_id=%s", message.conversation_id)
+        return ""
+
+    if detected_language:
+        conversation_languages[message.conversation_id] = detected_language
+        logger.info(
+            "Detected conversation language conversation_id=%s language=%s",
+            message.conversation_id,
+            detected_language,
+        )
+    return detected_language
+
+
+def _is_chinese_language(language: str) -> bool:
+    return language.lower() in ("zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant")
 
 
 def _string_id(value: Any) -> str:

@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     admin_webhook_url: str = Field(default="", alias="ADMIN_WEBHOOK_URL")
     admin_webhook_token: str = Field(default="", alias="ADMIN_WEBHOOK_TOKEN")
 
+    translation_private_note_enabled: bool = Field(default=False, alias="TRANSLATION_PRIVATE_NOTE_ENABLED")
+    translation_provider: str = Field(default="pygtrans", alias="TRANSLATION_PROVIDER")
+    translation_target_lang: str = Field(default="zh-CN", alias="TRANSLATION_TARGET_LANG")
+    translation_skip_chinese: bool = Field(default=True, alias="TRANSLATION_SKIP_CHINESE")
+    translation_min_text_length: int = Field(default=2, alias="TRANSLATION_MIN_TEXT_LENGTH")
+    translation_outgoing_enabled: bool = Field(default=False, alias="TRANSLATION_OUTGOING_ENABLED")
+    translation_default_user_lang: str = Field(default="", alias="TRANSLATION_DEFAULT_USER_LANG")
+    translation_timeout_seconds: int = Field(default=8, alias="TRANSLATION_TIMEOUT_SECONDS")
+    pygtrans_proxy: str = Field(default="", alias="PYGTRANS_PROXY")
+
     rag_min_confidence: float = Field(default=0.62, alias="RAG_MIN_CONFIDENCE")
     semantic_cache_threshold: float = Field(default=0.95, alias="SEMANTIC_CACHE_THRESHOLD")
     max_context_chunks: int = Field(default=4, alias="MAX_CONTEXT_CHUNKS")
