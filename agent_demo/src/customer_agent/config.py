@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
+
+    app_env: str = Field(default="development", alias="APP_ENV")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    llm_provider: str = Field(default="", alias="LLM_PROVIDER")
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_base_url: str = Field(default="", alias="LLM_BASE_URL")
+    llm_model: str = Field(default="", alias="LLM_MODEL")
+    embedding_model: str = Field(default="", alias="EMBEDDING_MODEL")
+
+    deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
+    deepseek_model: str = Field(default="deepseek-chat", alias="DEEPSEEK_MODEL")
+
+    database_url: str = Field(default="", alias="DATABASE_URL")
+    rag_provider: str = Field(default="memory", alias="RAG_PROVIDER")
+    db_host: str = Field(default="", alias="DB_HOST")
+    db_port: int = Field(default=5432, alias="DB_PORT")
+    db_name: str = Field(default="", alias="DB_NAME")
+    db_user: str = Field(default="", alias="DB_USER")
+    db_pass: str = Field(default="", alias="DB_PASS")
+
+    chatwoot_base_url: str = Field(default="", alias="CHATWOOT_BASE_URL")
+    chatwoot_account_id: str = Field(default="", alias="CHATWOOT_ACCOUNT_ID")
+    chatwoot_api_access_token: str = Field(default="", alias="CHATWOOT_API_ACCESS_TOKEN")
+    chatwoot_bot_agent_id: str = Field(default="", alias="CHATWOOT_BOT_AGENT_ID")
+    chatwoot_default_assignee_id: str = Field(default="", alias="CHATWOOT_DEFAULT_ASSIGNEE_ID")
+    chatwoot_open_on_incoming: bool = Field(default=False, alias="CHATWOOT_OPEN_ON_INCOMING")
+
+    admin_webhook_url: str = Field(default="", alias="ADMIN_WEBHOOK_URL")
+    admin_webhook_token: str = Field(default="", alias="ADMIN_WEBHOOK_TOKEN")
+
+    rag_min_confidence: float = Field(default=0.62, alias="RAG_MIN_CONFIDENCE")
+    semantic_cache_threshold: float = Field(default=0.95, alias="SEMANTIC_CACHE_THRESHOLD")
+    max_context_chunks: int = Field(default=4, alias="MAX_CONTEXT_CHUNKS")
+
+    @property
+    def resolved_database_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        if not all([self.db_host, self.db_name, self.db_user, self.db_pass]):
+            return ""
+        return (
+            f"postgresql://{self.db_user}:{self.db_pass}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
