@@ -40,6 +40,18 @@ Webhook 地址：
 http://你的服务地址:9090/webhook/chatwoot
 ```
 
+如果配置的是 Chatwoot Agent Bot URL，Chatwoot 可能会先做 SSRF 安全校验。此时不要使用 `localhost`、内网 IP、`*.local`、hosts 映射或解析到内网 IP 的 `nip.io` 地址；需要使用公网可访问的 HTTPS 地址，例如 Cloudflare Tunnel：
+
+```bash
+cloudflared tunnel --protocol http2 --url http://127.0.0.1:9090
+```
+
+然后在 Chatwoot Agent Bot URL 中填写：
+
+```text
+https://xxxx.trycloudflare.com/webhook/chatwoot
+```
+
 建议在 Chatwoot 后台订阅这些事件：
 
 ```json
@@ -54,6 +66,39 @@ http://你的服务地址:9090/webhook/chatwoot
 ```
 
 网关会先接收这些事件用于同步完整历史。只有 `event=message_created` 且 `message_type=incoming` 的公开用户消息才会触发 Agent；AI / 客服发出的 `outgoing` 消息、状态变化和私有备注只同步不触发 Agent，避免循环回复。
+
+## 快捷菜单与标准 FAQ
+
+网关内置了 Chatwoot 快捷菜单拦截：
+
+- 业务可维护模板统一在 `src/customer_agent/support_templates.py`，包括 FAQ、多语言文案、无意义消息、敏感词、隐私脱敏规则等。
+- `src/customer_agent/faq_config.py` 只保留 FAQ 查询和菜单构造函数，业务内容不放在这里。
+- Chatwoot 打开气泡时的 `webwidget_triggered` 事件通常没有 `conversation_id`，所以系统会等用户第一条公开消息创建会话后再弹菜单。
+- 首次用户消息会先走原有语言识别和私有备注翻译逻辑；只有识别为中文、英文或越南语时，才发送 FAQ 菜单。其它语言继续进入原来的 Agent / 翻译流程。
+- 菜单由两条公开消息组成：第一条是普通说明气泡，第二条是 `input_select` 按钮气泡。
+- 用户点击菜单按钮后，Chatwoot 可能通过 `message_updated` 提交按钮值。webhook 会在调用 LLM 前拦截 `CMD_...` 指令，命中后直接发送标准答案。
+- 用户输入 `帮助`、`菜单`、`help`、`/help`、`faq` 时，也会尝试按当前会话语言发送 FAQ 菜单。
+- 用户只发送 `你好`、`hi`、`test`、`??` 等低价值消息时，系统会先回复本地引导话术，再发送 FAQ 菜单模板，不进入 LLM。
+
+当前标准问题包括：
+
+```text
+公司和产品介绍
+为什么额度不高
+还款再次申请被拒
+利率问题
+```
+
+修改标准答案、按钮标题、语言模板、敏感词或过滤话术时，只需要调整 `support_templates.py`。
+
+## LLM 前置过滤
+
+为减少无效 token 消耗，网关在调用 Agent / RAG / LLM 前加入了本地 `message_guard`：
+
+- 无意义消息，如 `你好`、`hi`、`test`，直接本地回复并补发 FAQ 菜单模板，不调用 LLM。
+- 敏感/高风险消息，如投诉、报警、高利贷、暴力催收、隐私泄露等，直接转人工并写入私有备注，不调用 LLM。
+- 隐私字段，如手机号、身份证号、银行卡号、验证码、邮箱，会先脱敏，再进入后续 Agent 流程。
+- 词库和话术统一维护在 `src/customer_agent/support_templates.py`。
 
 如果要把 Chatwoot 历史同步到你自己的后台管理系统，在 `.env` 中配置：
 

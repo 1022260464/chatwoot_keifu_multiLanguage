@@ -11,7 +11,18 @@ import uvicorn
 from fastapi import FastAPI, Request
 
 from customer_agent.config import Settings
+from customer_agent.dashboard import build_dashboard_router
 from customer_agent.factory import build_agent
+from customer_agent.faq_config import (
+    build_faq_menu_attributes,
+    find_faq_command,
+    get_faq_answer,
+    get_faq_button_prompt,
+    get_faq_intro,
+    is_faq_menu_trigger,
+    is_supported_faq_language,
+)
+from customer_agent.message_guard import GuardResult, inspect_message
 from customer_agent.schemas import IncomingMessage
 from customer_agent.translator import (
     PrivateNoteTranslator,
@@ -39,8 +50,10 @@ agent = build_agent(settings)
 translator = PrivateNoteTranslator(settings)
 conversation_languages: dict[str, str] = {}
 conversation_locks: dict[str, asyncio.Lock] = {}
+faq_menu_sent_conversations: set[str] = set()
 
 app = FastAPI(title="Chatwoot DeepSeek Agent Gateway")
+app.include_router(build_dashboard_router(settings, agent, translator))
 
 
 def _spawn_task(coro: Any, task_name: str) -> None:
@@ -61,7 +74,105 @@ async def handle_incoming_message_task(payload: dict[str, Any], incoming_message
     conversation_id = incoming_message.conversation_id
     async with _conversation_lock(conversation_id):
         await translate_private_note_task(payload)
-        await process_message_task(incoming_message)
+        user_language = await _resolve_user_language(incoming_message)
+        guarded_message = await apply_message_guard_task(incoming_message, user_language)
+        if guarded_message:
+            await process_message_task(guarded_message)
+
+
+async def handle_faq_command_task(conversation_id: str, answer: str) -> None:
+    try:
+        logger.info("Handling FAQ command conversation_id=%s", conversation_id)
+        if settings.chatwoot_open_on_incoming:
+            await agent.open_conversation(conversation_id)
+        await agent.send_public_reply(conversation_id, answer)
+    except Exception:
+        logger.exception("Failed to handle FAQ command conversation_id=%s", conversation_id)
+
+
+async def send_standard_faq_menu_task(conversation_id: str, language: str = "") -> None:
+    if conversation_id in faq_menu_sent_conversations:
+        logger.info("FAQ menu already sent conversation_id=%s", conversation_id)
+        return
+
+    try:
+        logger.info("Sending FAQ menu conversation_id=%s language=%s", conversation_id, language or "unknown")
+        await agent.send_public_reply(conversation_id, get_faq_intro(language))
+        await agent.send_interactive_message(
+            conversation_id,
+            get_faq_button_prompt(language),
+            "input_select",
+            build_faq_menu_attributes(language),
+        )
+        faq_menu_sent_conversations.add(conversation_id)
+    except Exception:
+        logger.exception("Failed to send FAQ menu conversation_id=%s", conversation_id)
+
+
+async def handle_first_incoming_faq_menu_task(
+    payload: dict[str, Any],
+    incoming_message: IncomingMessage,
+) -> None:
+    conversation_id = incoming_message.conversation_id
+    async with _conversation_lock(conversation_id):
+        await translate_private_note_task(payload)
+        user_language = await _resolve_user_language(incoming_message)
+        guarded_message = await apply_message_guard_task(incoming_message, user_language)
+        if guarded_message is None:
+            return
+
+        if is_supported_faq_language(user_language):
+            await send_standard_faq_menu_task(conversation_id, user_language)
+            return
+
+        logger.info(
+            "FAQ menu skipped because language is not supported conversation_id=%s language=%s",
+            conversation_id,
+            user_language or "unknown",
+        )
+        await process_message_task(guarded_message)
+
+
+async def apply_message_guard_task(
+    incoming_message: IncomingMessage,
+    user_language: str,
+) -> IncomingMessage | None:
+    guard_result = inspect_message(incoming_message.content, user_language)
+    if guard_result.action == "reply":
+        logger.info(
+            "Message guard replied conversation_id=%s reason=%s",
+            incoming_message.conversation_id,
+            guard_result.reason,
+        )
+        await agent.send_public_reply(incoming_message.conversation_id, guard_result.reply)
+        if guard_result.reason == "low_value_message":
+            await send_standard_faq_menu_task(incoming_message.conversation_id, user_language)
+        return None
+
+    if guard_result.action == "handoff":
+        logger.info(
+            "Message guard handed off conversation_id=%s reason=%s",
+            incoming_message.conversation_id,
+            guard_result.reason,
+        )
+        if guard_result.private_note:
+            await agent.send_private_note(incoming_message.conversation_id, guard_result.private_note)
+        await agent.open_conversation(incoming_message.conversation_id)
+        await agent.send_public_reply(incoming_message.conversation_id, guard_result.reply)
+        return None
+
+    if guard_result.private_note:
+        await agent.send_private_note(incoming_message.conversation_id, guard_result.private_note)
+
+    if guard_result.sanitized_content and guard_result.sanitized_content != incoming_message.content:
+        logger.info(
+            "Message guard sanitized content conversation_id=%s reason=%s",
+            incoming_message.conversation_id,
+            guard_result.reason,
+        )
+        return _copy_incoming_message(incoming_message, guard_result)
+
+    return incoming_message
 
 
 def _conversation_lock(conversation_id: str) -> asyncio.Lock:
@@ -271,6 +382,37 @@ async def chatwoot_webhook(
 
     _spawn_task(sync_chatwoot_event_task(payload), "sync_chatwoot_event")
 
+    if event in ("webwidget_triggered", "conversation_created"):
+        conversation_id = _extract_conversation_id(payload)
+        language = conversation_languages.get(conversation_id)
+        if conversation_id and is_supported_faq_language(language):
+            _spawn_task(send_standard_faq_menu_task(conversation_id, language), "send_faq_menu")
+            return {"status": "synced", "agent": "faq_menu_queued"}
+        logger.warning(
+            "Skipped FAQ menu because conversation_id or language is missing event=%s conversation_id=%s language=%s",
+            event,
+            conversation_id or "unknown",
+            language or "unknown",
+        )
+
+    submitted_faq_command = _extract_faq_command(payload)
+    if submitted_faq_command:
+        conversation_id = _extract_conversation_id(payload)
+        if conversation_id:
+            faq_answer = get_faq_answer(submitted_faq_command, conversation_languages.get(conversation_id, ""))
+            if faq_answer:
+                logger.info(
+                    "Queued FAQ command from Chatwoot submission conversation_id=%s command=%s",
+                    conversation_id,
+                    submitted_faq_command,
+                )
+                _spawn_task(
+                    handle_faq_command_task(conversation_id, faq_answer),
+                    "handle_faq_command",
+                )
+                return {"status": "synced", "agent": "faq_handled"}
+        logger.warning("FAQ command was submitted but conversation_id is missing command=%s", submitted_faq_command)
+
     agent_ignore_reason = _get_agent_ignore_reason(payload)
     if agent_ignore_reason:
         logger.info("Skipped Agent processing reason=%s", agent_ignore_reason)
@@ -281,6 +423,30 @@ async def chatwoot_webhook(
     if incoming_message is None:
         logger.warning("Skipped Agent processing because required fields are missing")
         return {"status": "synced", "agent": "skipped", "reason": "Missing required fields"}
+
+    faq_command = _extract_faq_command(payload, incoming_message.content)
+    faq_language = _known_or_guessed_language(incoming_message)
+    faq_answer = get_faq_answer(faq_command, faq_language)
+    if faq_answer:
+        _spawn_task(
+            handle_faq_command_task(incoming_message.conversation_id, faq_answer),
+            "handle_faq_command",
+        )
+        return {"status": "synced", "agent": "faq_handled"}
+
+    if is_faq_menu_trigger(incoming_message.content):
+        _spawn_task(
+            handle_first_incoming_faq_menu_task(payload, incoming_message),
+            "send_faq_menu",
+        )
+        return {"status": "synced", "agent": "faq_menu_queued"}
+
+    if incoming_message.conversation_id not in faq_menu_sent_conversations:
+        _spawn_task(
+            handle_first_incoming_faq_menu_task(payload, incoming_message),
+            "send_faq_menu",
+        )
+        return {"status": "synced", "agent": "faq_menu_queued"}
 
     logger.info(
         "Queued Agent processing conversation_id=%s contact_id=%s content=%s",
@@ -302,7 +468,7 @@ def _get_agent_ignore_reason(payload: dict[str, Any]) -> str:
     if payload.get("private"):
         return "Private note"
 
-    if not str(payload.get("content") or "").strip():
+    if not str(payload.get("content") or "").strip() and not _extract_faq_command(payload):
         return "Empty content"
 
     return ""
@@ -363,6 +529,9 @@ def _is_translatable_outgoing_message(payload: dict[str, Any]) -> bool:
 
 def _to_incoming_message(payload: dict[str, Any]) -> IncomingMessage | None:
     content = str(payload.get("content") or "").strip()
+    faq_command = _extract_faq_command(payload)
+    if not content and faq_command:
+        content = faq_command
     conversation = payload.get("conversation") or {}
     sender = payload.get("sender") or {}
 
@@ -474,6 +643,78 @@ def _extract_conversation_id(payload: dict[str, Any]) -> str:
 def _extract_sender_type(payload: dict[str, Any]) -> str:
     sender = payload.get("sender") or {}
     return _string_id(sender.get("type") or payload.get("sender_type"))
+
+
+def _extract_faq_command(payload: dict[str, Any], fallback: str = "") -> str:
+    fallback_command = find_faq_command(fallback)
+    if fallback_command:
+        return fallback_command
+
+    return _find_submitted_faq_command(payload)
+
+
+def _find_submitted_faq_command(value: Any, parent_key: str = "") -> str:
+    if isinstance(value, str):
+        if _is_submission_key(parent_key):
+            return find_faq_command(value)
+        return ""
+
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            key_text = str(key)
+            if key_text in ("items", "raw"):
+                continue
+            command = _find_submitted_faq_command(nested_value, key_text)
+            if command:
+                return command
+        return ""
+
+    if isinstance(value, list):
+        for item in value:
+            command = _find_submitted_faq_command(item, parent_key)
+            if command:
+                return command
+        return ""
+
+    return ""
+
+
+def _is_submission_key(key: str) -> bool:
+    normalized = key.lower()
+    return normalized in {
+        "submitted_values",
+        "submitted_value",
+        "submitted_options",
+        "submitted_option",
+        "selected_values",
+        "selected_value",
+        "selected_option",
+        "selected_item",
+        "postback",
+        "postback_data",
+        "payload",
+        "value",
+        "title",
+    }
+
+
+def _known_or_guessed_language(message: IncomingMessage) -> str:
+    return conversation_languages.get(message.conversation_id) or str(
+        message.metadata.get("user_language") or ""
+    )
+
+
+def _copy_incoming_message(message: IncomingMessage, guard_result: GuardResult) -> IncomingMessage:
+    metadata = dict(message.metadata)
+    metadata["guard_reason"] = guard_result.reason
+    metadata["original_content_masked"] = True
+    return IncomingMessage(
+        conversation_id=message.conversation_id,
+        contact_id=message.contact_id,
+        content=guard_result.sanitized_content,
+        user_level=message.user_level,
+        metadata=metadata,
+    )
 
 
 async def _resolve_user_language(message: IncomingMessage) -> str:

@@ -42,6 +42,7 @@ class Settings(BaseSettings):
 
     admin_webhook_url: str = Field(default="", alias="ADMIN_WEBHOOK_URL")
     admin_webhook_token: str = Field(default="", alias="ADMIN_WEBHOOK_TOKEN")
+    dashboard_api_token: str = Field(default="", alias="DASHBOARD_API_TOKEN")
 
     translation_private_note_enabled: bool = Field(default=False, alias="TRANSLATION_PRIVATE_NOTE_ENABLED")
     translation_provider: str = Field(default="pygtrans", alias="TRANSLATION_PROVIDER")

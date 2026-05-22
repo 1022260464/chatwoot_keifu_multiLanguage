@@ -139,7 +139,7 @@ def get_translation_skip_reason(text: str, settings: Settings) -> str:
     if len(normalized) < settings.translation_min_text_length:
         return "Text is shorter than TRANSLATION_MIN_TEXT_LENGTH"
 
-    if settings.translation_skip_chinese and _contains_chinese(normalized):
+    if settings.translation_skip_chinese and contains_chinese(normalized):
         return "Text contains Chinese and TRANSLATION_SKIP_CHINESE is true"
 
     if not normalized:
@@ -152,8 +152,20 @@ def _contains_chinese(text: str) -> bool:
     return re.search(r"[\u4e00-\u9fff]", text) is not None
 
 
+def _contains_japanese_kana(text: str) -> bool:
+    return re.search(r"[\u3040-\u30ff]", text) is not None
+
+
+def _contains_korean_hangul(text: str) -> bool:
+    return re.search(r"[\uac00-\ud7af]", text) is not None
+
+
 def contains_chinese(text: str) -> bool:
-    return _contains_chinese(text)
+    return (
+        _contains_chinese(text)
+        and not _contains_japanese_kana(text)
+        and not _contains_korean_hangul(text)
+    )
 
 
 def guess_language(text: str) -> str:
@@ -161,7 +173,13 @@ def guess_language(text: str) -> str:
     if not normalized:
         return ""
 
-    if _contains_chinese(normalized):
+    if _contains_japanese_kana(normalized):
+        return "ja"
+
+    if _contains_korean_hangul(normalized):
+        return "ko"
+
+    if contains_chinese(normalized):
         return "zh-CN"
 
     # Vietnamese and many other languages use Latin letters. Only guess English
@@ -170,8 +188,60 @@ def guess_language(text: str) -> str:
     if not normalized.isascii():
         return ""
 
-    latin_letters = re.findall(r"[A-Za-z]", normalized)
-    if len(latin_letters) >= 2:
+    if _looks_like_english_ascii(normalized):
         return "en"
 
     return ""
+
+
+def _looks_like_english_ascii(text: str) -> bool:
+    if not text.isascii():
+        return False
+
+    words = re.findall(r"[A-Za-z']+", text.lower())
+    if not words:
+        return False
+
+    english_markers = {
+        "a",
+        "an",
+        "the",
+        "i",
+        "im",
+        "i'm",
+        "you",
+        "your",
+        "we",
+        "our",
+        "can",
+        "could",
+        "would",
+        "please",
+        "hello",
+        "hi",
+        "help",
+        "need",
+        "want",
+        "know",
+        "what",
+        "how",
+        "when",
+        "where",
+        "why",
+        "is",
+        "are",
+        "do",
+        "does",
+        "did",
+        "to",
+        "for",
+        "from",
+        "with",
+        "about",
+        "refund",
+        "policy",
+        "price",
+        "order",
+        "support",
+    }
+    return any(word in english_markers for word in words)

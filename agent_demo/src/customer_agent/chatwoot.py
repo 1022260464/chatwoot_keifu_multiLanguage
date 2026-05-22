@@ -37,18 +37,44 @@ class ChatwootClient(ChatwootGateway):
     async def send_private_note(self, conversation_id: str, content: str) -> None:
         await self._send_message(conversation_id, content, is_private=True)
 
+    async def send_interactive_message(
+        self,
+        conversation_id: str,
+        content: str,
+        content_type: str,
+        content_attributes: dict[str, Any],
+    ) -> None:
+        await self._send_message(
+            conversation_id,
+            content,
+            is_private=False,
+            content_type=content_type,
+            content_attributes=content_attributes,
+        )
+
     async def handoff_to_human(self, conversation_id: str, private_note: str) -> None:
         await self.open_conversation(conversation_id)
         if self._default_assignee_id:
             await self._assign_conversation(conversation_id, self._default_assignee_id)
         await self.send_private_note(conversation_id, private_note)
 
-    async def _send_message(self, conversation_id: str, content: str, is_private: bool) -> None:
+    async def _send_message(
+        self,
+        conversation_id: str,
+        content: str,
+        is_private: bool,
+        content_type: str = "text",
+        content_attributes: dict[str, Any] | None = None,
+    ) -> None:
         payload = {
             "content": content,
             "message_type": "outgoing",
             "private": is_private,
+            "content_type": content_type,
         }
+        if content_attributes is not None:
+            payload["content_attributes"] = content_attributes
+
         await self._post(
             f"/api/v1/accounts/{self._account_id}/conversations/{conversation_id}/messages",
             payload,

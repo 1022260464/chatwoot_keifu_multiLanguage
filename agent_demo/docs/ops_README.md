@@ -301,6 +301,24 @@ CHATWOOT_OPEN_ON_INCOMING=false
 - 三个核心配置 `CHATWOOT_BASE_URL`、`CHATWOOT_ACCOUNT_ID`、`CHATWOOT_API_ACCESS_TOKEN` 都存在时，系统会真正向 Chatwoot 发公开回复和私有备注。
 - 如果缺少核心配置，系统会进入空客户端模式，只在本地处理，不会写回 Chatwoot。
 
+Chatwoot Agent Bot URL 注意事项：
+
+- 如果 Chatwoot 启用了 SSRF 防护，Agent Bot URL 的域名必须解析到公网 IP。
+- 不要填写 `localhost`、`127.0.0.1`、`192.168.x.x`、`*.local`、hosts 映射域名，或最终解析到内网 IP 的 `nip.io` 地址。
+- 临时测试可用 Cloudflare Tunnel 暴露 Agent 服务：
+
+```bash
+cloudflared tunnel --protocol http2 --url http://127.0.0.1:9091
+```
+
+Chatwoot Agent Bot URL 填：
+
+```text
+https://xxxx.trycloudflare.com/webhook/chatwoot
+```
+
+如果日志出现 `Hostname ... has no public ip addresses`，说明不是服务不可达，而是 Chatwoot 安全校验拒绝了私网地址。
+
 常用开关：
 
 ```env
@@ -392,7 +410,64 @@ TRANSLATION_DEFAULT_USER_LANG=en
 
 这样服务重启后，即使还没重新识别用户语言，也可以默认把中文回复翻译成英文。
 
-### 5.7 语义缓存配置
+### 5.7 快捷菜单与标准 FAQ
+
+快捷菜单和前置过滤统一模板文件：
+
+```text
+src/customer_agent/support_templates.py
+```
+
+当前 FAQ 菜单只对中文、英文、越南语会话自动发送。流程是：
+
+- 用户打开 Web Widget 时，Chatwoot 通常只发送 `webwidget_triggered`，但没有 `conversation_id`，此时系统不能主动发菜单。
+- 用户发送第一条公开消息后，Chatwoot 创建会话并触发 `message_created + incoming`。
+- 系统先执行原有语言识别和私有备注翻译逻辑。
+- 如果语言是中文、英文或越南语，系统发送两条公开消息：一条说明气泡，一条 `input_select` 按钮气泡。
+- 如果语言不在支持范围内，系统不发送 FAQ 菜单，继续走原 Agent / 翻译流程。
+- 用户点击按钮后，Chatwoot 可能发送 `message_updated`，系统会从提交字段中识别 `CMD_...` 并直接回复标准答案，不调用 LLM。
+- 用户只发送 `你好`、`hi`、`test`、`??` 等低价值消息时，系统会先发送 `LOW_VALUE_REPLIES` 引导话术，再补发 FAQ 菜单模板，同样不调用 LLM。
+
+当前标准问题：
+
+```text
+公司和产品介绍
+为什么额度不高
+还款再次申请被拒
+利率问题
+```
+
+修改 FAQ 后需要重启服务：
+
+```bash
+sudo systemctl restart agent_demo.service
+```
+
+发布 FAQ 或前置过滤相关改动时，至少上传：
+
+```text
+src/main.py
+src/customer_agent/faq_config.py
+src/customer_agent/message_guard.py
+src/customer_agent/support_templates.py
+```
+
+如果正式环境还没有交互按钮发送能力，还需要上传：
+
+```text
+src/customer_agent/chatwoot.py
+src/customer_agent/clients.py
+src/customer_agent/workflow.py
+```
+
+前置过滤规则：
+
+- 无意义消息直接本地回复，并补发 FAQ 菜单模板，不进入 LLM。
+- 敏感/高风险关键词直接转人工，并写私有备注。
+- 手机号、身份证号、银行卡号、验证码、邮箱等隐私字段会脱敏后再进入 Agent。
+- 维护入口均在 `support_templates.py`，逻辑入口在 `message_guard.py`。
+
+### 5.8 语义缓存配置
 
 ```env
 SEMANTIC_CACHE_THRESHOLD=0.95
@@ -544,6 +619,45 @@ Chatwoot API error
 Chatwoot settings are incomplete
 ```
 
+### FAQ 菜单或按钮回复不生效
+
+先实时看日志：
+
+```bash
+sudo journalctl -u agent_demo.service -f -n 50
+```
+
+正常首次用户消息后应看到：
+
+```text
+Detected conversation language conversation_id=...
+Sending FAQ menu conversation_id=... language=...
+Sent Chatwoot message conversation_id=... private=False
+```
+
+如果首次用户消息是低价值消息，例如 `你好`，正常应看到：
+
+```text
+Message guard replied conversation_id=... reason=low_value_message
+Sending FAQ menu conversation_id=... language=...
+Sent Chatwoot message conversation_id=... private=False
+```
+
+正常点击按钮后应看到：
+
+```text
+Queued FAQ command from Chatwoot submission conversation_id=... command=CMD_...
+Handling FAQ command conversation_id=...
+Sent Chatwoot message conversation_id=... private=False
+```
+
+常见原因：
+
+- 只打开气泡，没有发送第一条消息。Chatwoot 的 `webwidget_triggered` 通常没有 `conversation_id`，系统无法给不存在的会话发菜单。
+- 用户语言不是中文、英文或越南语，系统会跳过 FAQ 菜单。
+- Chatwoot webhook 没有订阅 `message_updated`，按钮点击提交不会进入后端。
+- 只上传了 `faq_config.py`，但没有上传 `main.py`、`support_templates.py`、`message_guard.py` 或交互消息相关文件。
+
 ### 翻译不生效
 
 入站翻译检查：
@@ -629,6 +743,119 @@ curl http://127.0.0.1:9090/health
 - 日志中出现 `Queued Agent processing`。
 - 如果开启翻译，能看到 `[AI translation]` 私有备注。
 - 如果开启出站翻译，中文回复能被翻译成用户语言。
+
+### 运营测试流程
+
+发布 FAQ、前置过滤、Chatwoot webhook 或 Tunnel 相关改动后，按下面流程验收：
+
+1. 服务健康检查
+
+```bash
+curl http://127.0.0.1:9091/health
+```
+
+期望返回：
+
+```json
+{"status":"ok"}
+```
+
+2. 如果使用 Cloudflare Tunnel，确认公网地址可访问
+
+```bash
+curl https://xxxx.trycloudflare.com/health
+```
+
+期望同样返回 `{"status":"ok"}`。如果 `cloudflared` 日志出现 `Registered tunnel connection ... protocol=http2`，说明隧道已连上。
+
+3. 打开实时日志
+
+```bash
+sudo journalctl -u agent_demo.service -f -n 80
+```
+
+如果是手动运行 `uvicorn`，直接看当前终端输出。
+
+4. 在 Chatwoot Web Widget 发送低价值消息
+
+测试输入：
+
+```text
+你好
+```
+
+用户侧期望看到：
+
+- 一条低价值引导回复。
+- 一条 FAQ 说明气泡。
+- 一条 FAQ 按钮菜单。
+
+日志期望包含：
+
+```text
+POST /webhook/chatwoot HTTP/1.1" 200 OK
+Message guard replied conversation_id=... reason=low_value_message
+Sending FAQ menu conversation_id=... language=...
+Sent Chatwoot message conversation_id=... private=False
+```
+
+5. 点击 FAQ 菜单按钮
+
+任选一个按钮，例如“公司介绍 / 产品优势”。用户侧期望收到对应标准答案。
+
+日志期望包含：
+
+```text
+Queued FAQ command from Chatwoot submission conversation_id=... command=CMD_...
+Handling FAQ command conversation_id=...
+Sent Chatwoot message conversation_id=... private=False
+```
+
+6. 发送正常业务问题
+
+测试输入：
+
+```text
+我想咨询一下产品售后维修流程，需要提供哪些资料？
+```
+
+期望进入 Agent 流程。日志应出现：
+
+```text
+Queued Agent processing conversation_id=...
+Processing Chatwoot conversation_id=...
+Processed Chatwoot conversation_id=...
+```
+
+7. 发送敏感或高风险问题
+
+测试输入：
+
+```text
+我要投诉你们
+```
+
+期望转人工并写私有备注，不进入 LLM。日志应出现：
+
+```text
+Message guard handed off conversation_id=... reason=sensitive_keyword:...
+```
+
+8. 发送隐私字段测试
+
+测试输入：
+
+```text
+我的手机号是13800138000，请帮我查一下
+```
+
+期望进入 Agent 前被脱敏，并写私有备注。日志应出现：
+
+```text
+Message guard sanitized content conversation_id=... reason=privacy_masked:phone
+```
+
+测试完成后，把 Chatwoot 里的测试会话关闭或标记，避免影响真实运营统计。
 
 ## 10. 安全注意事项
 

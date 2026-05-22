@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .clients import ChatwootGateway, LLMClient, RagStore
 from .config import Settings
 from .schemas import AgentAction, AgentResult, AgentState, IncomingMessage, Intent
@@ -26,6 +28,20 @@ class CustomerSupportAgent:
 
     async def send_public_reply(self, conversation_id: str, content: str) -> None:
         await self._chatwoot.send_public_reply(conversation_id, content)
+
+    async def send_interactive_message(
+        self,
+        conversation_id: str,
+        content: str,
+        content_type: str,
+        content_attributes: dict[str, Any],
+    ) -> None:
+        await self._chatwoot.send_interactive_message(
+            conversation_id,
+            content,
+            content_type,
+            content_attributes,
+        )
 
     async def handle_message(self, message: IncomingMessage, send_public_reply: bool = True) -> AgentResult:
         state = AgentState(message=message)
