@@ -34,6 +34,32 @@ cd agent_demo
 python -m uvicorn main:app --app-dir src --host 0.0.0.0 --port 9090
 ```
 
+服务器上如果固定使用 `9091`，可以用脚本一键启动 Agent 后端和 Cloudflare Tunnel：
+
+```bash
+chmod +x scripts/start_agent_demo.sh
+./scripts/start_agent_demo.sh start
+./scripts/start_agent_demo.sh status
+```
+
+脚本会直接打印完整的 Chatwoot Agent Bot URL：
+
+```text
+https://xxxx.trycloudflare.com/webhook/chatwoot
+```
+
+如果只想重新查看当前 URL：
+
+```bash
+./scripts/start_agent_demo.sh url
+```
+
+停止：
+
+```bash
+./scripts/start_agent_demo.sh stop
+```
+
 Webhook 地址：
 
 ```text
@@ -167,6 +193,8 @@ DB_PORT=5432
 DB_NAME=你的数据库名
 DB_USER=你的用户名
 DB_PASS=你的密码
+KNOWLEDGE_SCHEMA=public
+KNOWLEDGE_TABLE_NAME=knowledge_chunks
 ```
 
 当前 `PgVectorRagStore` 预期存在 `knowledge_chunks` 表，包含：
@@ -177,6 +205,21 @@ chunk_text
 metadata
 search_vector
 ```
+
+建表、索引和示例插入脚本统一放在：
+
+```text
+db/001_create_knowledge_chunks.sql
+db/002_create_knowledge_indexes.sql
+db/003_create_knowledge_chunk_upsert.sql
+db/004_sample_inserts.sql
+db/sample_chunks.json
+scripts/import_knowledge_chunks.py
+src/customer_agent/document_chunking.py
+src/customer_agent/knowledge_ingestion.py
+```
+
+执行顺序见 `db/README.md`。
 
 后续接 embedding 后，可以把 `PgVectorRagStore.search()` 的 SQL 改成全文检索 + `pgvector` 混合检索。
 

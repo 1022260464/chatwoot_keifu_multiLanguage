@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     db_name: str = Field(default="", alias="DB_NAME")
     db_user: str = Field(default="", alias="DB_USER")
     db_pass: str = Field(default="", alias="DB_PASS")
+    knowledge_schema: str = Field(default="public", alias="KNOWLEDGE_SCHEMA")
+    knowledge_table_name: str = Field(default="knowledge_chunks", alias="KNOWLEDGE_TABLE_NAME")
 
     chatwoot_base_url: str = Field(default="", alias="CHATWOOT_BASE_URL")
     chatwoot_account_id: str = Field(default="", alias="CHATWOOT_ACCOUNT_ID")

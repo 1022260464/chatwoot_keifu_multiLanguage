@@ -1,0 +1,40 @@
+{
+  "chunks": [
+    {
+      "source_doc_id": "loan_faq_v1",
+      "source_name": "Loan product FAQ",
+      "source_type": "markdown",
+      "chunk_index": 0,
+      "chunk_text": "初始额度不高，主要是因为平台需要控制欺诈风险。当前市场中虚假资料、恶意借款等情况较多，所以系统会先根据用户资料、还款记录和风险策略给出较保守的额度。",
+      "embedding": null,
+      "metadata": {
+        "category": "faq",
+        "user_level": "all",
+        "version": "v1",
+        "topic": "credit_limit"
+      },
+      "language": "zh-CN",
+      "user_level": "all",
+      "tags": ["faq", "loan", "credit_limit"],
+      "token_count": 96
+    },
+    {
+      "source_doc_id": "loan_faq_v1",
+      "source_name": "Loan product FAQ",
+      "source_type": "markdown",
+      "chunk_index": 1,
+      "chunk_text": "对于信用记录良好、能够按时还款的用户，系统会逐步提高信任等级。通常在第三次按时还款之后，额度会有明显提升，利率也可能同步降低。",
+      "embedding": null,
+      "metadata": {
+        "category": "faq",
+        "user_level": "all",
+        "version": "v1",
+        "topic": "repayment"
+      },
+      "language": "zh-CN",
+      "user_level": "all",
+      "tags": ["faq", "loan", "repayment"],
+      "token_count": 72
+    }
+  ]
+}

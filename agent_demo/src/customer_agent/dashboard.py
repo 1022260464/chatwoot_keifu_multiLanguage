@@ -11,6 +11,13 @@ from fastapi import APIRouter, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .document_chunking import (
+    DocumentChunkBuildRequest,
+    DocumentChunkPreview,
+    build_knowledge_chunks,
+    preview_chunks,
+)
+from .knowledge_ingestion import KnowledgeChunkImportResult, PgKnowledgeChunkWriter
 
 
 class DashboardMessageSender(Protocol):
@@ -66,6 +73,20 @@ class DashboardConversationResponse(BaseModel):
     conversations: list[DashboardConversation]
 
 
+class KnowledgeDocumentRequest(DocumentChunkBuildRequest):
+    import_to_db: bool = False
+    deactivate_existing: bool = False
+    include_chunks: bool = True
+
+
+class KnowledgeDocumentResponse(BaseModel):
+    source_doc_id: str
+    chunk_count: int
+    imported: bool = False
+    import_result: KnowledgeChunkImportResult | None = None
+    chunks: list[DocumentChunkPreview] = Field(default_factory=list)
+
+
 def build_dashboard_router(
     settings: Settings,
     sender: DashboardMessageSender,
@@ -115,6 +136,47 @@ def build_dashboard_router(
         return DashboardConversationResponse(
             total=len(conversations),
             conversations=conversations,
+        )
+
+    @router.post("/knowledge/chunk-document", response_model=KnowledgeDocumentResponse)
+    async def chunk_knowledge_document(
+        payload: KnowledgeDocumentRequest,
+        x_dashboard_token: Annotated[str, Header(alias="X-Dashboard-Token")] = "",
+    ) -> KnowledgeDocumentResponse:
+        verify_dashboard_token(x_dashboard_token)
+
+        chunks = build_knowledge_chunks(payload)
+        if not chunks:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document content did not produce any chunks",
+            )
+
+        import_result: KnowledgeChunkImportResult | None = None
+        if payload.import_to_db:
+            try:
+                writer = PgKnowledgeChunkWriter.from_settings(settings)
+                import_result = await writer.import_chunks(
+                    chunks,
+                    deactivate_sources=[payload.source_doc_id] if payload.deactivate_existing else None,
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=str(exc),
+                ) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Knowledge import failed: {exc}",
+                ) from exc
+
+        return KnowledgeDocumentResponse(
+            source_doc_id=payload.source_doc_id,
+            chunk_count=len(chunks),
+            imported=payload.import_to_db,
+            import_result=import_result,
+            chunks=preview_chunks(chunks) if payload.include_chunks else [],
         )
 
     @router.post("/mass-messages", response_model=MassMessageResponse)

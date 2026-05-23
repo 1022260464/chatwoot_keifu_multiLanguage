@@ -29,7 +29,7 @@ export interface MassMessageResponse {
   translated: boolean
   target_language: string
   sent_content_preview: string
-  results: MassMessageItemResult[]
+  results: readonly MassMessageItemResult[]
 }
 
 export interface DashboardConversation {

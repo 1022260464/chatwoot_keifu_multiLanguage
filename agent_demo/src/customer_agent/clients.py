@@ -197,6 +197,8 @@ class PgVectorRagStore(RagStore):
         if not database_url:
             raise ValueError("DATABASE_URL or DB_* settings are required when using PgVectorRagStore")
         self._database_url = database_url
+        self._knowledge_schema = settings.knowledge_schema or "public"
+        self._knowledge_table_name = settings.knowledge_table_name or "knowledge_chunks"
 
     async def search(self, query: str, user_level: str, limit: int) -> list[RetrievedChunk]:
         import asyncio
@@ -205,24 +207,27 @@ class PgVectorRagStore(RagStore):
 
     def _search_sync(self, query: str, user_level: str, limit: int) -> list[RetrievedChunk]:
         import psycopg
+        from psycopg import sql
         from psycopg.rows import dict_row
 
-        sql = """
+        query_sql = sql.SQL("""
             SELECT
                 id::text AS doc_id,
                 chunk_text,
                 metadata,
                 ts_rank_cd(search_vector, plainto_tsquery('simple', %(query)s)) AS text_score
-            FROM knowledge_chunks
+            FROM {table}
             WHERE COALESCE(metadata->>'user_level', 'all') IN ('all', %(user_level)s)
               AND search_vector @@ plainto_tsquery('simple', %(query)s)
             ORDER BY text_score DESC
             LIMIT %(limit)s
-        """
+        """).format(
+            table=sql.Identifier(self._knowledge_schema, self._knowledge_table_name),
+        )
 
         with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
             rows = conn.execute(
-                sql,
+                query_sql,
                 {"query": query, "user_level": user_level, "limit": limit},
             ).fetchall()
 

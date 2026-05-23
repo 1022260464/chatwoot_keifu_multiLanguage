@@ -235,6 +235,8 @@ DB_PORT=5432
 DB_NAME=
 DB_USER=
 DB_PASS=
+KNOWLEDGE_SCHEMA=public
+KNOWLEDGE_TABLE_NAME=knowledge_chunks
 RAG_MIN_CONFIDENCE=0.62
 MAX_CONTEXT_CHUNKS=4
 ```
@@ -245,6 +247,8 @@ MAX_CONTEXT_CHUNKS=4
 - `RAG_PROVIDER=pgvector`：改用 PostgreSQL 知识库表 `knowledge_chunks`。
 - `DATABASE_URL`：完整数据库连接串。
 - `DB_HOST`、`DB_PORT`、`DB_NAME`、`DB_USER`、`DB_PASS`：数据库分项连接配置。
+- `KNOWLEDGE_SCHEMA`：知识库表所在 schema，默认 `public`。
+- `KNOWLEDGE_TABLE_NAME`：知识库表名，默认 `knowledge_chunks`。
 - `RAG_MIN_CONFIDENCE`：知识库命中最低置信度。
 - `MAX_CONTEXT_CHUNKS`：最多取多少条知识片段给 AI 参考。
 
@@ -264,6 +268,22 @@ DB_PORT=5432
 DB_NAME=数据库名
 DB_USER=用户名
 DB_PASS=密码
+KNOWLEDGE_SCHEMA=public
+KNOWLEDGE_TABLE_NAME=knowledge_chunks
+```
+
+建表、索引和示例插入脚本统一维护在：
+
+```text
+db/001_create_knowledge_chunks.sql
+db/002_create_knowledge_indexes.sql
+db/003_create_knowledge_chunk_upsert.sql
+db/004_sample_inserts.sql
+db/sample_chunks.json
+scripts/import_knowledge_chunks.py
+src/customer_agent/document_chunking.py
+src/customer_agent/knowledge_ingestion.py
+db/README.md
 ```
 
 效果：
@@ -720,6 +740,7 @@ RAG_PROVIDER=pgvector
 - 数据库能从 EC2 访问。
 - 表 `knowledge_chunks` 存在。
 - 表中有 `id`、`chunk_text`、`metadata`、`search_vector` 字段。
+- 建表、索引、插入函数脚本已按顺序执行：`db/001_create_knowledge_chunks.sql`、`db/002_create_knowledge_indexes.sql`、`db/003_create_knowledge_chunk_upsert.sql`。
 
 ## 9. 发布后检查清单
 

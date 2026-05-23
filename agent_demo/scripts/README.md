@@ -1,11 +1,96 @@
-# Chatwoot User Admin Script
+# Agent Demo Scripts
 
-这个目录存放 Chatwoot 运维脚本。当前脚本用于在 Chatwoot 前端不显示“发送激活邮件”按钮时，直接从服务器后台处理客服账号验证。
+这个目录存放 Agent Demo 和 Chatwoot 运维脚本。
 
 ## 文件
 
 ```text
 chatwoot_user_admin.sh
+start_agent_demo.sh
+import_knowledge_chunks.py
+```
+
+## Agent 后端一键启动
+
+`start_agent_demo.sh` 用于在服务器上一键启动 Agent 后端和 Cloudflare Tunnel。
+
+默认启动命令等价于：
+
+```bash
+python -m uvicorn main:app --app-dir src --host 0.0.0.0 --port 9091
+cloudflared tunnel --protocol http2 --url http://127.0.0.1:9091
+```
+
+上传后先授权：
+
+```bash
+chmod +x scripts/start_agent_demo.sh
+```
+
+启动：
+
+```bash
+./scripts/start_agent_demo.sh start
+```
+
+查看状态和公网地址：
+
+```bash
+./scripts/start_agent_demo.sh status
+```
+
+只打印当前 Chatwoot Agent Bot URL：
+
+```bash
+./scripts/start_agent_demo.sh url
+```
+
+输出示例：
+
+```text
+Tunnel URL: https://xxxx.trycloudflare.com
+Chatwoot Agent Bot URL:
+https://xxxx.trycloudflare.com/webhook/chatwoot
+```
+
+查看日志：
+
+```bash
+./scripts/start_agent_demo.sh logs
+```
+
+停止：
+
+```bash
+./scripts/start_agent_demo.sh stop
+```
+
+只启动 Agent，不启动 Cloudflare Tunnel：
+
+```bash
+ENABLE_TUNNEL=false ./scripts/start_agent_demo.sh start
+```
+
+常用覆盖项：
+
+```bash
+PORT=9091 ./scripts/start_agent_demo.sh start
+PYTHON_BIN=/path/to/python ./scripts/start_agent_demo.sh start
+APP_DIR=/mnt/chawoot_houduan_agent/agent_demo ./scripts/start_agent_demo.sh start
+```
+
+日志文件：
+
+```text
+logs/agent_demo.log
+logs/cloudflared.log
+```
+
+PID 文件：
+
+```text
+.run/agent_demo.pid
+.run/cloudflared.pid
 ```
 
 ## 使用前提
