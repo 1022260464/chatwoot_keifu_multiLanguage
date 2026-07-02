@@ -1,39 +1,27 @@
 from __future__ import annotations
 
 
-FAQ_MENU_TRIGGERS = {"帮助", "菜单", "help", "/help", "faq"}
+FAQ_MENU_TRIGGERS = {
+    "help",
+    "/help",
+    "faq",
+    "menu",
+    "tro giup",
+    "trợ giúp",
+    "\u5e2e\u52a9",
+    "\u83dc\u5355",
+}
 FAQ_COMMAND_PREFIX = "CMD_"
 
+PUBLIC_REPLY_FALLBACKS = {
+    "en": "Sorry, we cannot answer automatically right now. A support agent will continue helping you.",
+    "vi": "Xin lỗi, hiện tại chúng tôi chưa thể trả lời tự động. Nhân viên hỗ trợ sẽ tiếp tục xử lý cho bạn.",
+}
+
 FAQ_LOCALES = {
-    "zh": {
-        "intro": "您好！我是智能助手，请问有什么可以帮您？您可以直接点击下方问题快速获取答案：",
-        "button_prompt": "请选择一个常见问题：",
-        "items": [
-            {
-                "title": "公司介绍\n产品优势",
-                "value": "CMD_COMPANY_PRODUCT_INTRO",
-                "answer": "我们是本土化运营的正规服务团队，产品主要面向有真实资金需求、信用记录良好的用户。相比暴力催收的黑网贷，我们更重视长期信用关系：信用表现越好，后续可获得的额度会更高，利率也会更低。我们不会骚扰用户的家属和朋友，也不会采用不合规的催收方式。",
-            },
-            {
-                "title": "额度问题\n为什么不高",
-                "value": "CMD_LOW_CREDIT_LIMIT",
-                "answer": "初始额度不高，主要是因为平台需要控制欺诈风险。当前市场中虚假资料、恶意借款等情况较多，所以系统会先根据用户资料、还款记录和风险策略给出较保守的额度。对于信用好的用户，只要保持按时还款，通常在第三次按时还款之后，额度会有明显提升。",
-            },
-            {
-                "title": "复借问题\n再次被拒",
-                "value": "CMD_REAPPLY_REJECTED",
-                "answer": "还款后再次申请被拒，通常不是单一原因导致的。平台会根据实时风控策略、用户资料完整度、历史还款表现、当前授信政策等因素综合判断。由于欺诈风险较高，审核政策也会不定时调整。感谢您的理解和信任，建议后续保持良好信用记录，并在一段时间后再尝试申请。",
-            },
-            {
-                "title": "利率问题\n如何降低",
-                "value": "CMD_INTEREST_RATE",
-                "answer": "目前产品仍处于测试和优化阶段，初期利率会根据用户风险等级、信用表现和平台策略综合确定。对于信用记录良好、能够按时还款的用户，系统会逐步提高信任等级。通常在第三次按时还款之后，平台会明显降低利率，并可能同步提升可用额度。",
-            },
-        ],
-    },
     "en": {
-        "intro": "Hi! I am the smart assistant. You can choose a common question below for a quick answer.",
-        "button_prompt": "Please select a question:",
+        "intro": "[Quick FAQ Menu] Select a question below to receive a preset answer. For other questions, type your question and the AI assistant will assist you.",
+        "button_prompt": "Select a FAQ item (preset answer):",
         "items": [
             {
                 "title": "Company\nProduct",
@@ -58,28 +46,28 @@ FAQ_LOCALES = {
         ],
     },
     "vi": {
-        "intro": "Xin chao! Toi la tro ly thong minh. Ban co the chon cau hoi thuong gap ben duoi de nhan cau tra loi nhanh.",
-        "button_prompt": "Vui long chon mot cau hoi:",
+        "intro": "[Menu câu hỏi thường gặp] Chọn câu hỏi bên dưới để nhận câu trả lời có sẵn. Nếu cần hỏi vấn đề khác, hãy nhập câu hỏi và trợ lý AI sẽ hỗ trợ bạn.",
+        "button_prompt": "Chọn một câu hỏi thường gặp (câu trả lời có sẵn):",
         "items": [
             {
-                "title": "Cong ty\nSan pham",
+                "title": "Công ty\nSản phẩm",
                 "value": "CMD_COMPANY_PRODUCT_INTRO",
-                "answer": "Chung toi la doi ngu dich vu dia phuong hoa, tap trung vao nguoi dung co nhu cau von thuc te va hanh vi tin dung tot. So voi cac nen tang cho vay den thu hoi no bang cach manh bao, chung toi coi trong moi quan he tin dung lau dai hon. Nguoi dung co lich su tin dung tot co the nhan han muc cao hon va lai suat thap hon theo thoi gian. Chung toi se khong lam phien gia dinh hay ban be cua nguoi dung.",
+                "answer": "Chúng tôi là đội ngũ dịch vụ địa phương hóa, tập trung vào người dùng có nhu cầu vốn thực tế và hành vi tín dụng tốt. So với các nền tảng cho vay đen thu hồi nợ bằng cách mạnh bạo, chúng tôi coi trọng mối quan hệ tín dụng lâu dài hơn. Người dùng có lịch sử tín dụng tốt có thể nhận hạn mức cao hơn và lãi suất thấp hơn theo thời gian. Chúng tôi sẽ không làm phiền gia đình hay bạn bè của người dùng.",
             },
             {
-                "title": "Han muc\nVi sao thap?",
+                "title": "Hạn mức\nVì sao thấp?",
                 "value": "CMD_LOW_CREDIT_LIMIT",
-                "answer": "Han muc ban dau co the khong cao vi nen tang can kiem soat rui ro gian lan. Hien co nhieu truong hop dung thong tin gia hoac vay voi muc dich xau, nen he thong se danh gia thong tin nguoi dung, lich su tra no va quy tac rui ro truoc khi cap han muc. Voi nguoi dung co tin dung tot va tra dung han, han muc thuong se tang dang ke sau lan thu ba tra no dung han.",
+                "answer": "Hạn mức ban đầu có thể chưa cao vì nền tảng cần kiểm soát rủi ro gian lận. Hiện có nhiều trường hợp dùng thông tin giả hoặc vay với mục đích xấu, nên hệ thống sẽ đánh giá thông tin người dùng, lịch sử trả nợ và quy tắc rủi ro trước khi cấp hạn mức. Với người dùng có tín dụng tốt và trả đúng hạn, hạn mức thường sẽ tăng đáng kể sau lần thứ ba trả nợ đúng hạn.",
             },
             {
-                "title": "Dang ky lai\nBi tu choi",
+                "title": "Đăng ký lại\nBị từ chối",
                 "value": "CMD_REAPPLY_REJECTED",
-                "answer": "Viec bi tu choi khi dang ky lai sau khi tra no co the den tu nhieu ly do. Nen tang se danh gia chinh sach rui ro theo thoi gian thuc, do hoan chinh cua ho so, lich su tra no va quy tac cap tin dung hien tai. Vi rui ro gian lan cao, chinh sach phe duyet co the thay doi theo tung thoi diem. Cam on su tin tuong cua ban, ban co the duy tri lich su tin dung tot va thu lai sau.",
+                "answer": "Việc bị từ chối khi đăng ký lại sau khi trả nợ có thể đến từ nhiều lý do. Nền tảng sẽ đánh giá chính sách rủi ro theo thời gian thực, độ hoàn chỉnh của hồ sơ, lịch sử trả nợ và quy tắc cấp tín dụng hiện tại. Vì rủi ro gian lận cao, chính sách phê duyệt có thể thay đổi theo từng thời điểm. Cảm ơn sự tin tưởng của bạn, bạn có thể duy trì lịch sử tín dụng tốt và thử lại sau.",
             },
             {
-                "title": "Lai suat\nCach giam",
+                "title": "Lãi suất\nCách giảm",
                 "value": "CMD_INTEREST_RATE",
-                "answer": "San pham hien van trong giai doan thu nghiem va toi uu. Lai suat ban dau duoc xac dinh dua tren muc do rui ro, hanh vi tin dung va chinh sach cua nen tang. Voi nguoi dung co lich su tin dung tot va tra no dung han, he thong se dan tang muc do tin cay. Sau lan thu ba tra no dung han, lai suat thuong se giam dang ke va han muc kha dung cung co the duoc tang.",
+                "answer": "Sản phẩm hiện vẫn trong giai đoạn thử nghiệm và tối ưu. Lãi suất ban đầu được xác định dựa trên mức độ rủi ro, hành vi tín dụng và chính sách của nền tảng. Với người dùng có lịch sử tín dụng tốt và trả nợ đúng hạn, hệ thống sẽ dần tăng mức độ tin cậy. Sau lần thứ ba trả nợ đúng hạn, lãi suất thường sẽ giảm đáng kể và hạn mức khả dụng cũng có thể tăng.",
             },
         ],
     },
@@ -87,17 +75,13 @@ FAQ_LOCALES = {
 
 LOW_VALUE_MESSAGES = {
     "zh": {
-        "你好",
-        "您好",
-        "在吗",
-        "有人吗",
-        "哈",
-        "哈哈",
-        "嗯",
-        "哦",
-        "？",
-        "？？",
-        "。",
+        "\u4f60\u597d",
+        "\u60a8\u597d",
+        "\u5728\u5417",
+        "\u6709\u4eba\u5417",
+        "\u55ef",
+        "\u54e6",
+        "\u54c8\u54c8",
     },
     "en": {
         "hi",
@@ -113,6 +97,7 @@ LOW_VALUE_MESSAGES = {
     },
     "vi": {
         "xin chao",
+        "xin chào",
         "alo",
         "test",
         "ok",
@@ -122,29 +107,28 @@ LOW_VALUE_MESSAGES = {
 }
 
 LOW_VALUE_REPLIES = {
-    "zh": "您好，请问您想咨询公司产品、额度、复借还是利率问题？您也可以点击下方常见问题快速了解。",
-    "en": "Hi, what would you like to know about: company/product, credit limit, reapplication, or interest rate?",
-    "vi": "Xin chao, ban muon hoi ve cong ty/san pham, han muc, dang ky lai hay lai suat?",
+    "en": "Hi! The quick FAQ menu is shown below. Select a button for a preset answer, or type another question for AI assistance.",
+    "vi": "Xin chào! Menu câu hỏi thường gặp ở bên dưới. Chọn nút để xem câu trả lời có sẵn, hoặc nhập câu hỏi khác để được trợ lý AI hỗ trợ.",
 }
 
 SENSITIVE_KEYWORDS = {
     "zh": {
-        "投诉",
-        "报警",
-        "起诉",
-        "律师",
-        "诈骗",
-        "被骗",
-        "高利贷",
-        "黑网贷",
-        "暴力催收",
-        "威胁",
-        "恐吓",
-        "骚扰家人",
-        "泄露隐私",
-        "砍头息",
-        "自杀",
-        "轻生",
+        "\u6295\u8bc9",
+        "\u62a5\u8b66",
+        "\u8d77\u8bc9",
+        "\u5f8b\u5e08",
+        "\u8bc8\u9a97",
+        "\u88ab\u9a97",
+        "\u9ad8\u5229\u8d37",
+        "\u9ed1\u7f51\u8d37",
+        "\u66b4\u529b\u50ac\u6536",
+        "\u5a01\u80c1",
+        "\u6050\u5413",
+        "\u9a9a\u6270\u5bb6\u4eba",
+        "\u6cc4\u9732\u9690\u79c1",
+        "\u780d\u5934\u606f",
+        "\u81ea\u6740",
+        "\u8f7b\u751f",
     },
     "en": {
         "complaint",
@@ -160,19 +144,25 @@ SENSITIVE_KEYWORDS = {
     },
     "vi": {
         "khieu nai",
+        "khiếu nại",
         "canh sat",
+        "cảnh sát",
         "lua dao",
+        "lừa đảo",
         "gian lan",
+        "gian lận",
         "de doa",
+        "đe dọa",
         "quay roi",
+        "quấy rối",
         "tu tu",
+        "tự tử",
     },
 }
 
 SENSITIVE_PUBLIC_REPLIES = {
-    "zh": "这个问题需要人工客服进一步核实，我已经帮您转接人工处理，请稍等。",
     "en": "This issue needs to be reviewed by a human support agent. I have forwarded it to the team. Please wait a moment.",
-    "vi": "Van de nay can nhan vien ho tro kiem tra them. Toi da chuyen cho nhan vien, vui long doi trong giay lat.",
+    "vi": "Vấn đề này cần nhân viên hỗ trợ kiểm tra thêm. Tôi đã chuyển cho nhân viên, vui lòng đợi trong giây lát.",
 }
 
 PRIVACY_PATTERNS = [
@@ -181,10 +171,10 @@ PRIVACY_PATTERNS = [
     {"name": "bank_card", "pattern": r"(?<!\d)\d{12,19}(?!\d)", "mask": "[BANK_CARD]"},
     {
         "name": "verification_code",
-        "pattern": r"(验证码|code|otp|ma|mã)\s*[:：]?\s*\d{4,6}",
+        "pattern": r"(code|otp|ma|mã)\s*[:：]?\s*\d{4,6}",
         "mask": "[VERIFICATION_CODE]",
     },
     {"name": "email", "pattern": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "mask": "[EMAIL]"},
 ]
 
-PRIVACY_PRIVATE_NOTE_PREFIX = "用户消息包含可能的隐私字段，传入 Agent 前已脱敏"
+PRIVACY_PRIVATE_NOTE_PREFIX = "User message may contain private fields; masked before Agent processing"

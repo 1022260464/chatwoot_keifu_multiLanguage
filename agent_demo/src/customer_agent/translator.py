@@ -26,6 +26,9 @@ class PrivateNoteTranslator:
     async def translate(self, text: str, target: str) -> str:
         return await asyncio.to_thread(self._translate_sync, text, target)
 
+    async def translate_with_deepseek(self, text: str, target: str) -> str:
+        return await asyncio.to_thread(self._deepseek_translate_sync, text, target)
+
     async def detect_language(self, text: str) -> str:
         guessed = guess_language(text)
         if guessed:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +15,9 @@ class Settings(BaseSettings):
 
     app_env: str = Field(default="development", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    glitchtip_dsn: str = Field(default="", alias="GLITCHTIP_DSN")
+    sentry_dsn: str = Field(default="", alias="SENTRY_DSN")
+    sentry_traces_sample_rate: float = Field(default=0.0, alias="SENTRY_TRACES_SAMPLE_RATE")
 
     llm_provider: str = Field(default="", alias="LLM_PROVIDER")
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
@@ -41,6 +45,18 @@ class Settings(BaseSettings):
     chatwoot_bot_agent_id: str = Field(default="", alias="CHATWOOT_BOT_AGENT_ID")
     chatwoot_default_assignee_id: str = Field(default="", alias="CHATWOOT_DEFAULT_ASSIGNEE_ID")
     chatwoot_open_on_incoming: bool = Field(default=False, alias="CHATWOOT_OPEN_ON_INCOMING")
+    chatwoot_language_source: Literal["detect", "inbox"] = Field(
+        default="detect",
+        alias="CHATWOOT_LANGUAGE_SOURCE",
+    )
+    chatwoot_inbox_language_map: dict[str, str] = Field(
+        default_factory=dict,
+        alias="CHATWOOT_INBOX_LANGUAGE_MAP",
+    )
+    chatwoot_website_token_language_map: dict[str, str] = Field(
+        default_factory=dict,
+        alias="CHATWOOT_WEBSITE_TOKEN_LANGUAGE_MAP",
+    )
 
     admin_webhook_url: str = Field(default="", alias="ADMIN_WEBHOOK_URL")
     admin_webhook_token: str = Field(default="", alias="ADMIN_WEBHOOK_TOKEN")
@@ -55,10 +71,18 @@ class Settings(BaseSettings):
     translation_default_user_lang: str = Field(default="", alias="TRANSLATION_DEFAULT_USER_LANG")
     translation_timeout_seconds: int = Field(default=8, alias="TRANSLATION_TIMEOUT_SECONDS")
     pygtrans_proxy: str = Field(default="", alias="PYGTRANS_PROXY")
+    public_reply_fallback_language: Literal["en", "vi"] = Field(
+        default="vi",
+        alias="PUBLIC_REPLY_FALLBACK_LANGUAGE",
+    )
 
     rag_min_confidence: float = Field(default=0.62, alias="RAG_MIN_CONFIDENCE")
     semantic_cache_threshold: float = Field(default=0.95, alias="SEMANTIC_CACHE_THRESHOLD")
     max_context_chunks: int = Field(default=4, alias="MAX_CONTEXT_CHUNKS")
+
+    @property
+    def error_reporting_dsn(self) -> str:
+        return self.glitchtip_dsn or self.sentry_dsn
 
     @property
     def resolved_database_url(self) -> str:

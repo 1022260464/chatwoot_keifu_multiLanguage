@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import re
 import json
+import re
 from abc import ABC, abstractmethod
 from collections import Counter
 from math import sqrt
+from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
-from typing import Any
 
 from .config import Settings
 from .schemas import IncomingMessage, Intent, RetrievedChunk
@@ -60,13 +60,55 @@ class ChatwootGateway(ABC):
     async def handoff_to_human(self, conversation_id: str, private_note: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    async def update_conversation_custom_attributes(
+        self,
+        conversation_id: str,
+        custom_attributes: dict[str, Any],
+    ) -> None:
+        raise NotImplementedError
+
 
 class MockLLMClient(LLMClient):
     async def classify_intent(self, message: IncomingMessage) -> Intent:
         text = message.content.lower()
-        handoff_words = ("人工", "真人", "客服", "投诉", "生气", "差评", "退款不到账")
-        business_words = ("订单", "物流", "发票", "账号", "套餐", "开通")
-        faq_words = ("怎么", "如何", "政策", "费用", "价格", "退款", "时间", "支持")
+        handoff_words = (
+            "human",
+            "agent",
+            "support",
+            "complaint",
+            "scam",
+            "fraud",
+            "refund",
+            "nhân viên",
+            "hỗ trợ",
+            "khiếu nại",
+            "lừa đảo",
+            "gian lận",
+            "hoàn tiền",
+        )
+        business_words = (
+            "order",
+            "invoice",
+            "account",
+            "loan",
+            "limit",
+            "interest",
+            "hạn mức",
+            "lãi suất",
+            "vay",
+        )
+        faq_words = (
+            "how",
+            "policy",
+            "fee",
+            "price",
+            "time",
+            "support",
+            "vì sao",
+            "cách",
+            "bao lâu",
+        )
 
         if any(word in text for word in handoff_words):
             return Intent.HUMAN_HANDOFF
@@ -80,17 +122,20 @@ class MockLLMClient(LLMClient):
 
     async def generate_answer(self, message: IncomingMessage, chunks: list[RetrievedChunk]) -> str:
         if not chunks:
-            return "这个问题我暂时没有查到可靠资料，我会为你转接人工客服继续处理。"
+            return "Hiện tại tôi chưa tìm thấy thông tin đáng tin cậy cho câu hỏi này. Nhân viên hỗ trợ sẽ tiếp tục xử lý cho bạn."
 
         facts = "\n".join(f"- {chunk.text}" for chunk in chunks)
-        return f"根据当前知识库，我可以这样回答：\n{facts}"
+        if _contains_cjk(facts):
+            return "Tôi đã tìm thấy thông tin liên quan, nhưng nội dung này cần nhân viên hỗ trợ xác nhận thêm trước khi trả lời."
+
+        return f"Theo thông tin hiện có, tôi có thể trả lời như sau:\n{facts}"
 
     async def summarize_handoff(self, message: IncomingMessage, reason: str) -> str:
         return (
-            f"AI 建议转人工。\n"
-            f"原因：{reason}\n"
-            f"用户问题：{message.content}\n"
-            f"联系人：{message.contact_id}"
+            "[AI handoff]\n"
+            f"Reason: {reason}\n"
+            f"User message: {message.content}\n"
+            f"Contact: {message.contact_id}"
         )
 
 
@@ -104,9 +149,9 @@ class DeepSeekLLMClient(LLMClient):
 
     async def classify_intent(self, message: IncomingMessage) -> Intent:
         prompt = (
-            "你是客服意图分类器。只输出以下枚举之一："
-            "chitchat, faq, business, complaint, human_handoff, unknown。\n"
-            f"用户消息：{message.content}"
+            "You are a customer-support intent classifier. Output exactly one enum value: "
+            "chitchat, faq, business, complaint, human_handoff, unknown.\n"
+            f"User message: {message.content}"
         )
         raw = await self._chat(prompt)
         normalized = raw.strip().lower()
@@ -118,20 +163,22 @@ class DeepSeekLLMClient(LLMClient):
     async def generate_answer(self, message: IncomingMessage, chunks: list[RetrievedChunk]) -> str:
         context = "\n\n".join(f"[{idx + 1}] {chunk.text}" for idx, chunk in enumerate(chunks))
         prompt = (
-            "你是企业客服 AI。请只基于给定知识库上下文回答；"
-            "如果上下文不足，明确说明需要人工确认。回答要简洁、准确、中文。\n\n"
-            f"知识库上下文：\n{context or '无'}\n\n"
-            f"用户问题：{message.content}"
+            "You are an enterprise customer-support AI. Answer only from the provided knowledge-base context. "
+            "If the context is insufficient, say that a human support agent needs to confirm. "
+            "The public reply must be concise, accurate, and written in Vietnamese only. "
+            "Never output Chinese. Do not include reasoning, analysis, or hidden steps.\n\n"
+            f"Knowledge-base context:\n{context or 'None'}\n\n"
+            f"User question:\n{message.content}"
         )
         return await self._chat(prompt)
 
     async def summarize_handoff(self, message: IncomingMessage, reason: str) -> str:
         prompt = (
-            "请为人工客服生成一段内部交接备注，包含用户诉求、转人工原因、建议下一步。"
-            "控制在 120 字以内。\n"
-            f"转人工原因：{reason}\n"
-            f"用户消息：{message.content}\n"
-            f"联系人 ID：{message.contact_id}"
+            "Create a short internal handoff note for a human support agent. Include the user need, "
+            "handoff reason, and recommended next step. Keep it under 120 words.\n"
+            f"Handoff reason: {reason}\n"
+            f"User message: {message.content}\n"
+            f"Contact ID: {message.contact_id}"
         )
         return await self._chat(prompt)
 
@@ -264,6 +311,13 @@ class NullChatwootClient(ChatwootGateway):
     async def handoff_to_human(self, conversation_id: str, private_note: str) -> None:
         return None
 
+    async def update_conversation_custom_attributes(
+        self,
+        conversation_id: str,
+        custom_attributes: dict[str, Any],
+    ) -> None:
+        return None
+
 
 def _term_vector(text: str) -> Counter[str]:
     tokens = re.findall(r"[\w\u4e00-\u9fff]+", text.lower())
@@ -285,3 +339,7 @@ def _cosine_similarity(left: Counter[str], right: Counter[str]) -> float:
     left_norm = sqrt(sum(value * value for value in left.values()))
     right_norm = sqrt(sum(value * value for value in right.values()))
     return numerator / (left_norm * right_norm)
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text))

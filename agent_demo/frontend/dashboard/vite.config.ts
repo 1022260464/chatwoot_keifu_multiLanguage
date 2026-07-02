@@ -14,6 +14,12 @@ export default defineConfig(({ mode }) => {
       __DASHBOARD_API_TOKEN__: JSON.stringify(
         backendEnv.DASHBOARD_API_TOKEN || backendEnv.VITE_DASHBOARD_API_TOKEN || '',
       ),
+      __GLITCHTIP_DSN__: JSON.stringify(
+        backendEnv.GLITCHTIP_DSN || backendEnv.VITE_GLITCHTIP_DSN || backendEnv.SENTRY_DSN || '',
+      ),
+      __SENTRY_TRACES_SAMPLE_RATE__: JSON.stringify(
+        backendEnv.SENTRY_TRACES_SAMPLE_RATE || backendEnv.VITE_SENTRY_TRACES_SAMPLE_RATE || '0',
+      ),
     },
     server: {
       host: '0.0.0.0',

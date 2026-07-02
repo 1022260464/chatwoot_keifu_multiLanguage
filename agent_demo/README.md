@@ -156,14 +156,14 @@ PYGTRANS_PROXY=
 
 网关收到 `message_created + incoming + sender.type=contact` 的公开用户消息后，会用 `pygtrans.Translate` 翻译非中文内容，并作为 Chatwoot 私有备注写回当前会话。用户看不到这条备注，只有后台座席可见。
 
-如果希望座席/AI 发出的中文消息再自动翻译成该会话用户语言，可以开启：
+如果希望 AI 中文回复、座席中文私有备注再自动翻译成该会话用户语言，可以开启：
 
 ```env
 TRANSLATION_OUTGOING_ENABLED=true
 TRANSLATION_DEFAULT_USER_LANG=
 ```
 
-系统会先从用户 incoming 消息中识别语言并按 `conversation_id` 缓存在内存里；之后检测到该会话出现中文 `outgoing` 公开消息时，会自动发送一条翻译后的公开回复。`TRANSLATION_DEFAULT_USER_LANG` 可作为服务重启后尚未识别到用户语言时的兜底值，例如 `en`、`ja`、`ko`。
+系统会先从用户 incoming 消息中识别语言并按 `conversation_id` 缓存在内存里；AI 回复会在发送前翻译，座席要给外语用户发中文草稿时应写成 Chatwoot 私有备注，系统检测到中文 `outgoing` 私有备注后，会自动发送一条翻译后的公开回复。`TRANSLATION_DEFAULT_USER_LANG` 可作为服务重启后尚未识别到用户语言时的兜底值，例如 `en`、`ja`、`ko`。
 
 ## 使用真实 DeepSeek
 

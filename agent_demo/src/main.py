@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
@@ -14,27 +15,39 @@ from customer_agent.config import Settings
 from customer_agent.dashboard import build_dashboard_router
 from customer_agent.factory import build_agent
 from customer_agent.faq_config import (
-    build_faq_menu_attributes,
     find_faq_command,
     get_faq_answer,
-    get_faq_button_prompt,
     get_faq_intro,
+    get_faq_menu_text,
     is_faq_menu_trigger,
     is_supported_faq_language,
+    normalize_faq_language,
 )
 from customer_agent.message_guard import GuardResult, inspect_message
 from customer_agent.schemas import IncomingMessage
+from customer_agent.support_templates import PUBLIC_REPLY_FALLBACKS
 from customer_agent.translator import (
     PrivateNoteTranslator,
     contains_chinese,
     get_translation_skip_reason,
     guess_language,
 )
+from customer_agent.workflow import AI_HANDOFF_NOTE_PREFIX
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 DEFAULT_PORT = 9090
+AI_GUARD_NOTE_PREFIX = "[AI guard note]"
+AI_HANDOFF_CUSTOM_ATTRIBUTE = "ai_handoff"
+AI_HANDOFF_REASON_CUSTOM_ATTRIBUTE = "ai_handoff_reason"
+AI_HANDOFF_AT_CUSTOM_ATTRIBUTE = "ai_handoff_at"
+AI_UNMATCHED_FALLBACK_REPLY_PREFIXES = (
+    "Cau hoi ban nhap hien khong khop voi menu cau hoi thuong gap",
+    "Câu hỏi bạn nhập hiện không khớp với menu câu hỏi thường gặp",
+)
+ATTACHMENT_MESSAGE_PLACEHOLDER = "[attachment]"
+IMAGE_MESSAGE_PLACEHOLDER = "[attachment:image]"
 SYNC_EVENTS = {
     "conversation_created",
     "conversation_status_changed",
@@ -51,6 +64,8 @@ translator = PrivateNoteTranslator(settings)
 conversation_languages: dict[str, str] = {}
 conversation_locks: dict[str, asyncio.Lock] = {}
 faq_menu_sent_conversations: set[str] = set()
+human_handoff_conversations: set[str] = set()
+ai_fallback_replied_conversations: set[str] = set()
 
 app = FastAPI(title="Chatwoot DeepSeek Agent Gateway")
 app.include_router(build_dashboard_router(settings, agent, translator))
@@ -74,6 +89,9 @@ async def handle_incoming_message_task(payload: dict[str, Any], incoming_message
     conversation_id = incoming_message.conversation_id
     async with _conversation_lock(conversation_id):
         await translate_private_note_task(payload)
+        if _is_conversation_handed_off(conversation_id):
+            logger.info("Skipped Agent processing because conversation already handed off conversation_id=%s", conversation_id)
+            return
         user_language = await _resolve_user_language(incoming_message)
         guarded_message = await apply_message_guard_task(incoming_message, user_language)
         if guarded_message:
@@ -85,7 +103,7 @@ async def handle_faq_command_task(conversation_id: str, answer: str) -> None:
         logger.info("Handling FAQ command conversation_id=%s", conversation_id)
         if settings.chatwoot_open_on_incoming:
             await agent.open_conversation(conversation_id)
-        await agent.send_public_reply(conversation_id, answer)
+        await _send_public_reply(conversation_id, answer)
     except Exception:
         logger.exception("Failed to handle FAQ command conversation_id=%s", conversation_id)
 
@@ -96,14 +114,10 @@ async def send_standard_faq_menu_task(conversation_id: str, language: str = "") 
         return
 
     try:
-        logger.info("Sending FAQ menu conversation_id=%s language=%s", conversation_id, language or "unknown")
-        await agent.send_public_reply(conversation_id, get_faq_intro(language))
-        await agent.send_interactive_message(
-            conversation_id,
-            get_faq_button_prompt(language),
-            "input_select",
-            build_faq_menu_attributes(language),
-        )
+        public_language = _public_template_language(conversation_id, language)
+        logger.info("Sending FAQ menu conversation_id=%s language=%s", conversation_id, public_language)
+        await _send_public_reply(conversation_id, get_faq_intro(public_language), public_language)
+        await _send_public_reply(conversation_id, get_faq_menu_text(public_language), public_language)
         faq_menu_sent_conversations.add(conversation_id)
     except Exception:
         logger.exception("Failed to send FAQ menu conversation_id=%s", conversation_id)
@@ -116,13 +130,24 @@ async def handle_first_incoming_faq_menu_task(
     conversation_id = incoming_message.conversation_id
     async with _conversation_lock(conversation_id):
         await translate_private_note_task(payload)
+        if _is_conversation_handed_off(conversation_id):
+            logger.info("Skipped first-message automation because conversation already handed off conversation_id=%s", conversation_id)
+            return
         user_language = await _resolve_user_language(incoming_message)
-        guarded_message = await apply_message_guard_task(incoming_message, user_language)
+        menu_sent = False
+        if is_supported_faq_language(user_language):
+            await send_standard_faq_menu_task(conversation_id, user_language)
+            menu_sent = True
+
+        guarded_message = await apply_message_guard_task(
+            incoming_message,
+            user_language,
+            suppress_low_value_reply=menu_sent,
+        )
         if guarded_message is None:
             return
 
-        if is_supported_faq_language(user_language):
-            await send_standard_faq_menu_task(conversation_id, user_language)
+        if menu_sent:
             return
 
         logger.info(
@@ -136,33 +161,47 @@ async def handle_first_incoming_faq_menu_task(
 async def apply_message_guard_task(
     incoming_message: IncomingMessage,
     user_language: str,
+    suppress_low_value_reply: bool = False,
 ) -> IncomingMessage | None:
     guard_result = inspect_message(incoming_message.content, user_language)
     if guard_result.action == "reply":
+        if guard_result.reason == "low_value_message" and suppress_low_value_reply:
+            logger.info(
+                "Message guard low-value reply skipped because initial FAQ menu was sent conversation_id=%s",
+                incoming_message.conversation_id,
+            )
+            return None
         logger.info(
             "Message guard replied conversation_id=%s reason=%s",
             incoming_message.conversation_id,
             guard_result.reason,
         )
-        await agent.send_public_reply(incoming_message.conversation_id, guard_result.reply)
+        await _send_public_reply(incoming_message.conversation_id, guard_result.reply, user_language)
         if guard_result.reason == "low_value_message":
             await send_standard_faq_menu_task(incoming_message.conversation_id, user_language)
         return None
 
     if guard_result.action == "handoff":
+        await _mark_conversation_handoff(incoming_message.conversation_id, guard_result.reason)
         logger.info(
             "Message guard handed off conversation_id=%s reason=%s",
             incoming_message.conversation_id,
             guard_result.reason,
         )
         if guard_result.private_note:
-            await agent.send_private_note(incoming_message.conversation_id, guard_result.private_note)
+            await agent.send_private_note(
+                incoming_message.conversation_id,
+                f"{AI_GUARD_NOTE_PREFIX}\n{guard_result.private_note}",
+            )
         await agent.open_conversation(incoming_message.conversation_id)
-        await agent.send_public_reply(incoming_message.conversation_id, guard_result.reply)
+        await _send_public_reply(incoming_message.conversation_id, guard_result.reply, user_language)
         return None
 
     if guard_result.private_note:
-        await agent.send_private_note(incoming_message.conversation_id, guard_result.private_note)
+        await agent.send_private_note(
+            incoming_message.conversation_id,
+            f"{AI_GUARD_NOTE_PREFIX}\n{guard_result.private_note}",
+        )
 
     if guard_result.sanitized_content and guard_result.sanitized_content != incoming_message.content:
         logger.info(
@@ -183,44 +222,250 @@ def _conversation_lock(conversation_id: str) -> asyncio.Lock:
     return lock
 
 
-async def process_message_task(incoming_message: IncomingMessage) -> None:
+def _is_unmatched_fallback_reply(reply: str) -> bool:
+    normalized_reply = reply.strip()
+    return any(normalized_reply.startswith(prefix) for prefix in AI_UNMATCHED_FALLBACK_REPLY_PREFIXES)
+
+
+def _mark_ai_fallback_replied(conversation_id: str, reply: str) -> None:
+    if _is_unmatched_fallback_reply(reply):
+        ai_fallback_replied_conversations.add(conversation_id)
+
+
+async def _mark_conversation_handoff(conversation_id: str, reason: str = "") -> None:
+    human_handoff_conversations.add(conversation_id)
     try:
-        logger.info("Processing Chatwoot conversation_id=%s", incoming_message.conversation_id)
+        await agent.update_conversation_custom_attributes(
+            conversation_id,
+            {
+                AI_HANDOFF_CUSTOM_ATTRIBUTE: True,
+                AI_HANDOFF_REASON_CUSTOM_ATTRIBUTE: reason,
+                AI_HANDOFF_AT_CUSTOM_ATTRIBUTE: datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception:
+        logger.exception("Failed to persist handoff custom attribute conversation_id=%s", conversation_id)
+
+
+def _sync_handoff_state_from_payload(conversation_id: str, payload: dict[str, Any]) -> None:
+    if not conversation_id:
+        return
+
+    custom_attributes = _conversation_custom_attributes(payload)
+    if AI_HANDOFF_CUSTOM_ATTRIBUTE not in custom_attributes:
+        return
+
+    if _is_truthy_custom_attribute(custom_attributes.get(AI_HANDOFF_CUSTOM_ATTRIBUTE)):
+        human_handoff_conversations.add(conversation_id)
+    else:
+        human_handoff_conversations.discard(conversation_id)
+
+
+def _is_conversation_handed_off(conversation_id: str) -> bool:
+    return conversation_id in human_handoff_conversations
+
+
+def _conversation_custom_attributes(payload: dict[str, Any]) -> dict[str, Any]:
+    conversation = payload.get("conversation") or {}
+    attributes = conversation.get("custom_attributes") or {}
+    return attributes if isinstance(attributes, dict) else {}
+
+
+def _is_truthy_custom_attribute(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return False
+
+
+async def _send_public_reply(
+    conversation_id: str,
+    content: str,
+    target_language: str = "",
+) -> None:
+    public_text = await _ensure_public_text(conversation_id, content, target_language)
+    await agent.send_public_reply(conversation_id, public_text)
+
+
+async def _ensure_public_text(
+    conversation_id: str,
+    content: str,
+    target_language: str = "",
+) -> str:
+    public_text = str(content or "").strip()
+    if not public_text:
+        return _public_reply_fallback_text()
+
+    if not contains_chinese(public_text):
+        return public_text
+
+    public_language = _resolve_public_target_language(conversation_id, target_language)
+    try:
+        translated_text = await asyncio.wait_for(
+            translator.translate(public_text, target=public_language),
+            timeout=settings.translation_timeout_seconds,
+        )
+    except TimeoutError:
+        logger.warning(
+            "Public reply translation timed out; trying DeepSeek conversation_id=%s target_language=%s",
+            conversation_id,
+            public_language,
+        )
+        deepseek_translated_text = await _translate_public_reply_with_deepseek(
+            conversation_id,
+            public_text,
+            public_language,
+        )
+        if deepseek_translated_text:
+            return deepseek_translated_text
+        return _public_reply_fallback_text()
+    except Exception:
+        logger.exception(
+            "Public reply translation failed; trying DeepSeek conversation_id=%s target_language=%s",
+            conversation_id,
+            public_language,
+        )
+        deepseek_translated_text = await _translate_public_reply_with_deepseek(
+            conversation_id,
+            public_text,
+            public_language,
+        )
+        if deepseek_translated_text:
+            return deepseek_translated_text
+        return _public_reply_fallback_text()
+
+    if translated_text and not contains_chinese(translated_text):
+        logger.info(
+            "Translated Chinese public reply before sending conversation_id=%s target_language=%s",
+            conversation_id,
+            public_language,
+        )
+        return translated_text
+
+    logger.warning(
+        "Public reply translation returned empty or Chinese text; trying DeepSeek conversation_id=%s target_language=%s",
+        conversation_id,
+        public_language,
+    )
+    deepseek_translated_text = await _translate_public_reply_with_deepseek(
+        conversation_id,
+        public_text,
+        public_language,
+    )
+    if deepseek_translated_text:
+        return deepseek_translated_text
+
+    return _public_reply_fallback_text()
+
+
+async def _translate_public_reply_with_deepseek(
+    conversation_id: str,
+    content: str,
+    target_language: str,
+) -> str:
+    if not settings.deepseek_api_key:
+        logger.warning("Public reply DeepSeek fallback skipped because DEEPSEEK_API_KEY is empty conversation_id=%s", conversation_id)
+        return ""
+
+    try:
+        translated_text = await asyncio.wait_for(
+            translator.translate_with_deepseek(content, target=target_language),
+            timeout=settings.translation_timeout_seconds,
+        )
+    except TimeoutError:
+        logger.warning(
+            "Public reply DeepSeek fallback timed out conversation_id=%s target_language=%s",
+            conversation_id,
+            target_language,
+        )
+        return ""
+    except Exception:
+        logger.exception(
+            "Public reply DeepSeek fallback failed conversation_id=%s target_language=%s",
+            conversation_id,
+            target_language,
+        )
+        return ""
+
+    if translated_text and not contains_chinese(translated_text):
+        logger.info(
+            "Translated Chinese public reply with DeepSeek fallback conversation_id=%s target_language=%s",
+            conversation_id,
+            target_language,
+        )
+        return translated_text
+
+    logger.warning(
+        "Public reply DeepSeek fallback returned empty or Chinese text conversation_id=%s target_language=%s",
+        conversation_id,
+        target_language,
+    )
+    return ""
+
+
+def _public_template_language(conversation_id: str, language: str = "") -> str:
+    public_language = _resolve_public_target_language(conversation_id, language)
+    normalized_language = normalize_faq_language(public_language)
+    if normalized_language and normalized_language != "zh":
+        return normalized_language
+
+    fallback_language = normalize_faq_language(settings.public_reply_fallback_language)
+    if fallback_language and fallback_language != "zh":
+        return fallback_language
+
+    return "vi"
+
+
+def _resolve_public_target_language(conversation_id: str, target_language: str = "") -> str:
+    language = (
+        str(target_language or "").strip()
+        or conversation_languages.get(conversation_id, "")
+        or settings.translation_default_user_lang.strip()
+        or settings.public_reply_fallback_language.strip()
+        or "vi"
+    )
+    if _is_chinese_language(language):
+        fallback_language = settings.public_reply_fallback_language.strip() or "vi"
+        if _is_chinese_language(fallback_language):
+            return "vi"
+        return fallback_language
+    return language
+
+
+def _public_reply_fallback_text() -> str:
+    language = settings.public_reply_fallback_language.strip().lower()
+    return PUBLIC_REPLY_FALLBACKS.get(language) or PUBLIC_REPLY_FALLBACKS["vi"]
+
+
+async def process_message_task(incoming_message: IncomingMessage) -> None:
+    conversation_id = incoming_message.conversation_id
+    if _is_conversation_handed_off(conversation_id):
+        logger.info("Skipped Agent processing because conversation already handed off conversation_id=%s", conversation_id)
+        return
+
+    try:
+        logger.info("Processing Chatwoot conversation_id=%s", conversation_id)
         if settings.chatwoot_open_on_incoming:
-            await agent.open_conversation(incoming_message.conversation_id)
+            await agent.open_conversation(conversation_id)
 
         user_language = await _resolve_user_language(incoming_message)
-        should_translate_reply = (
-            settings.translation_outgoing_enabled
-            and user_language
-            and not _is_chinese_language(user_language)
-        )
         result = await agent.handle_message(
             incoming_message,
-            send_public_reply=not should_translate_reply,
+            send_public_reply=False,
         )
 
-        if should_translate_reply and result.action.type == "reply":
-            translated_reply = await asyncio.wait_for(
-                translator.translate(result.reply, target=user_language),
-                timeout=settings.translation_timeout_seconds,
-            )
-            if translated_reply:
-                await agent.send_public_reply(incoming_message.conversation_id, translated_reply)
-                await agent.send_private_note(
-                    incoming_message.conversation_id,
-                    f"[Original AI reply]\n{result.reply}",
-                )
-                logger.info(
-                    "Sent translated Agent reply conversation_id=%s target_language=%s",
-                    incoming_message.conversation_id,
-                    user_language,
-                )
+        if result.action.type == "handoff":
+            await _mark_conversation_handoff(conversation_id, result.action.reason)
+            logger.info("Marked conversation as handed off conversation_id=%s reason=%s", conversation_id, result.action.reason)
+        elif result.action.type == "reply":
+            if _is_unmatched_fallback_reply(result.reply) and conversation_id in ai_fallback_replied_conversations:
+                logger.info("Skipped repeated unmatched fallback reply conversation_id=%s", conversation_id)
             else:
-                logger.warning(
-                    "Translated Agent reply was empty; original reply was not sent conversation_id=%s",
-                    incoming_message.conversation_id,
-                )
+                await _send_public_reply(conversation_id, result.reply, user_language)
+                _mark_ai_fallback_replied(conversation_id, result.reply)
 
         logger.info(
             "Processed Chatwoot conversation_id=%s intent=%s action=%s",
@@ -231,7 +476,7 @@ async def process_message_task(incoming_message: IncomingMessage) -> None:
     except Exception:
         logger.exception(
             "Failed to process Chatwoot conversation_id=%s",
-            incoming_message.conversation_id,
+            conversation_id,
         )
 
 
@@ -254,18 +499,30 @@ async def translate_private_note_task(payload: dict[str, Any]) -> None:
         return
 
     try:
-        if settings.translation_private_note_enabled or settings.translation_outgoing_enabled:
-            detected_language = await asyncio.wait_for(
-                translator.detect_language(content),
-                timeout=settings.translation_timeout_seconds,
-            )
-            if detected_language:
-                conversation_languages[conversation_id] = detected_language
-                logger.info(
-                    "Detected conversation language conversation_id=%s language=%s",
+        configured_language = _configured_channel_language(payload)
+        if _uses_inbox_language():
+            if not configured_language:
+                logger.warning(
+                    "No configured channel language found while CHATWOOT_LANGUAGE_SOURCE=inbox "
+                    "conversation_id=%s",
                     conversation_id,
-                    detected_language,
                 )
+                await _detect_and_cache_conversation_language(conversation_id, content)
+            else:
+                conversation_languages[conversation_id] = configured_language
+                logger.info(
+                    "Using configured channel language conversation_id=%s language=%s",
+                    conversation_id,
+                    configured_language,
+                )
+        if not content:
+            logger.info("Translation skipped reason=Empty content")
+            return
+
+        if not _uses_inbox_language() and (
+            settings.translation_private_note_enabled or settings.translation_outgoing_enabled
+        ):
+            await _detect_and_cache_conversation_language(conversation_id, content)
 
         skip_reason = get_translation_skip_reason(content, settings)
         if skip_reason:
@@ -325,12 +582,7 @@ async def translate_outgoing_to_user_language_task(payload: dict[str, Any]) -> N
             logger.warning("Outgoing translation skipped because translated text is empty")
             return
 
-        if not payload.get("private"):
-            await agent.send_private_note(
-                conversation_id,
-                f"[Auto translated to {target_language}]\n{translated_text}",
-            )
-        await agent.send_public_reply(conversation_id, translated_text)
+        await _send_public_reply(conversation_id, translated_text, target_language)
         logger.info(
             "Sent outgoing translation conversation_id=%s target_language=%s",
             conversation_id,
@@ -380,10 +632,19 @@ async def chatwoot_webhook(
         logger.info("Ignored unsupported Chatwoot event=%s", event or "unknown")
         return {"status": "ignored", "reason": "Unsupported event"}
 
+    conversation_id = _extract_conversation_id(payload)
+    configured_language = _configured_channel_language(payload)
+    if conversation_id and configured_language:
+        conversation_languages[conversation_id] = configured_language
+    _sync_handoff_state_from_payload(conversation_id, payload)
+
     _spawn_task(sync_chatwoot_event_task(payload), "sync_chatwoot_event")
 
     if event in ("webwidget_triggered", "conversation_created"):
-        conversation_id = _extract_conversation_id(payload)
+        if conversation_id and _is_conversation_handed_off(conversation_id):
+            logger.info("Skipped FAQ menu because conversation already handed off conversation_id=%s", conversation_id)
+            return {"status": "synced", "agent": "skipped", "reason": "Conversation already handed off"}
+
         language = conversation_languages.get(conversation_id)
         if conversation_id and is_supported_faq_language(language):
             _spawn_task(send_standard_faq_menu_task(conversation_id, language), "send_faq_menu")
@@ -395,9 +656,21 @@ async def chatwoot_webhook(
             language or "unknown",
         )
 
+    if conversation_id and _is_conversation_handed_off(conversation_id) and _is_contact_incoming_message(payload):
+        logger.info("Skipped automated handling because conversation already handed off conversation_id=%s", conversation_id)
+        _spawn_task(translate_private_note_task(payload), "translate_private_note_after_handoff")
+        return {"status": "synced", "agent": "skipped", "reason": "Conversation already handed off"}
+
     submitted_faq_command = _extract_faq_command(payload)
     if submitted_faq_command:
         conversation_id = _extract_conversation_id(payload)
+        if conversation_id and _is_conversation_handed_off(conversation_id):
+            logger.info(
+                "Skipped FAQ command because conversation already handed off conversation_id=%s command=%s",
+                conversation_id,
+                submitted_faq_command,
+            )
+            return {"status": "synced", "agent": "skipped", "reason": "Conversation already handed off"}
         if conversation_id:
             faq_answer = get_faq_answer(submitted_faq_command, conversation_languages.get(conversation_id, ""))
             if faq_answer:
@@ -468,7 +741,11 @@ def _get_agent_ignore_reason(payload: dict[str, Any]) -> str:
     if payload.get("private"):
         return "Private note"
 
-    if not str(payload.get("content") or "").strip() and not _extract_faq_command(payload):
+    if (
+        not str(payload.get("content") or "").strip()
+        and not _extract_faq_command(payload)
+        and not _has_message_attachments(payload)
+    ):
         return "Empty content"
 
     return ""
@@ -491,7 +768,7 @@ def _is_contact_incoming_message(payload: dict[str, Any]) -> bool:
     if sender_type and sender_type not in ("contact", "contact_inbox", "unknown"):
         return False
 
-    return bool(str(payload.get("content") or "").strip())
+    return bool(str(payload.get("content") or "").strip() or _has_message_attachments(payload))
 
 
 def _is_public_outgoing_message(payload: dict[str, Any]) -> bool:
@@ -510,14 +787,20 @@ def _is_translatable_outgoing_message(payload: dict[str, Any]) -> bool:
     if payload.get("message_type") != "outgoing":
         return False
 
+    if not payload.get("private"):
+        return False
+
     content = str(payload.get("content") or "").strip()
     if not content:
         return False
 
-    # Do not translate notes created by this gateway, otherwise private-note
-    # audit messages can become public replies and create confusing duplicates.
+    # Human agents use private notes as Chinese drafts for visitor-facing
+    # translations. Public outgoing messages are already visible to visitors,
+    # so translating them again would duplicate replies and can self-trigger.
     system_prefixes = (
         "[AI translation]",
+        AI_HANDOFF_NOTE_PREFIX,
+        AI_GUARD_NOTE_PREFIX,
         "[Original AI reply]",
         "[Auto translated to",
     )
@@ -527,11 +810,71 @@ def _is_translatable_outgoing_message(payload: dict[str, Any]) -> bool:
     return True
 
 
+def _extract_message_attachments(payload: dict[str, Any]) -> list[Any]:
+    message = payload.get("message")
+    candidates = [
+        payload.get("attachments"),
+        message.get("attachments") if isinstance(message, dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return candidate
+    return []
+
+
+def _has_message_attachments(payload: dict[str, Any]) -> bool:
+    return bool(_extract_message_attachments(payload))
+
+
+def _attachment_content_placeholder(payload: dict[str, Any]) -> str:
+    for attachment in _extract_message_attachments(payload):
+        if not isinstance(attachment, dict):
+            continue
+        file_type = str(
+            attachment.get("file_type")
+            or attachment.get("fileType")
+            or attachment.get("type")
+            or ""
+        ).lower()
+        content_type = str(
+            attachment.get("content_type")
+            or attachment.get("contentType")
+            or attachment.get("mime_type")
+            or attachment.get("mimeType")
+            or ""
+        ).lower()
+        if file_type == "image" or content_type.startswith("image/"):
+            return IMAGE_MESSAGE_PLACEHOLDER
+    return ATTACHMENT_MESSAGE_PLACEHOLDER
+
+
+def _attachment_types(payload: dict[str, Any]) -> list[str]:
+    attachment_types: list[str] = []
+    for attachment in _extract_message_attachments(payload):
+        if not isinstance(attachment, dict):
+            continue
+        attachment_type = str(
+            attachment.get("file_type")
+            or attachment.get("fileType")
+            or attachment.get("type")
+            or attachment.get("content_type")
+            or attachment.get("mime_type")
+            or "unknown"
+        ).strip()
+        if attachment_type:
+            attachment_types.append(attachment_type)
+    return attachment_types
+
+
 def _to_incoming_message(payload: dict[str, Any]) -> IncomingMessage | None:
     content = str(payload.get("content") or "").strip()
+    is_attachment_only = False
     faq_command = _extract_faq_command(payload)
     if not content and faq_command:
         content = faq_command
+    elif not content and _has_message_attachments(payload):
+        content = _attachment_content_placeholder(payload)
+        is_attachment_only = True
     conversation = payload.get("conversation") or {}
     sender = payload.get("sender") or {}
 
@@ -545,7 +888,8 @@ def _to_incoming_message(payload: dict[str, Any]) -> IncomingMessage | None:
     if not conversation_id or not content:
         return None
 
-    custom_attributes = conversation.get("custom_attributes") or {}
+    configured_language = _configured_channel_language(payload)
+    custom_attributes = _conversation_custom_attributes(payload)
     contact_custom_attributes = sender.get("custom_attributes") or {}
     user_level = str(
         custom_attributes.get("user_level")
@@ -562,7 +906,11 @@ def _to_incoming_message(payload: dict[str, Any]) -> IncomingMessage | None:
             "chatwoot_message_id": payload.get("id"),
             "chatwoot_inbox_id": payload.get("inbox_id"),
             "chatwoot_account_id": payload.get("account", {}).get("id"),
-            "user_language": guess_language(content),
+            "configured_language": configured_language,
+            "ai_handoff": _is_truthy_custom_attribute(custom_attributes.get(AI_HANDOFF_CUSTOM_ATTRIBUTE)),
+            "attachment_count": len(_extract_message_attachments(payload)),
+            "attachment_types": _attachment_types(payload),
+            "user_language": "" if _uses_inbox_language() or is_attachment_only else guess_language(content),
         },
     )
 
@@ -645,6 +993,37 @@ def _extract_sender_type(payload: dict[str, Any]) -> str:
     return _string_id(sender.get("type") or payload.get("sender_type"))
 
 
+def _configured_channel_language(payload: dict[str, Any]) -> str:
+    if not _uses_inbox_language():
+        return ""
+
+    inbox = payload.get("inbox") or {}
+    conversation = payload.get("conversation") or {}
+    inbox_id = _string_id(
+        inbox.get("id")
+        or conversation.get("inbox_id")
+        or payload.get("inbox_id")
+    )
+    if inbox_id:
+        language = str(settings.chatwoot_inbox_language_map.get(inbox_id, "")).strip()
+        if language:
+            return language
+
+    website_token = _extract_website_token(payload)
+    if website_token:
+        return str(settings.chatwoot_website_token_language_map.get(website_token, "")).strip()
+    return ""
+
+
+def _extract_website_token(payload: dict[str, Any]) -> str:
+    inbox = payload.get("inbox") or {}
+    return _string_id(inbox.get("website_token") or payload.get("website_token"))
+
+
+def _uses_inbox_language() -> bool:
+    return settings.chatwoot_language_source.strip().lower() == "inbox"
+
+
 def _extract_faq_command(payload: dict[str, Any], fallback: str = "") -> str:
     fallback_command = find_faq_command(fallback)
     if fallback_command:
@@ -699,6 +1078,15 @@ def _is_submission_key(key: str) -> bool:
 
 
 def _known_or_guessed_language(message: IncomingMessage) -> str:
+    configured_language = str(message.metadata.get("configured_language") or "")
+    if _uses_inbox_language():
+        if configured_language:
+            conversation_languages[message.conversation_id] = configured_language
+        return configured_language or conversation_languages.get(message.conversation_id, "")
+
+    if configured_language:
+        conversation_languages[message.conversation_id] = configured_language
+        return configured_language
     return conversation_languages.get(message.conversation_id) or str(
         message.metadata.get("user_language") or ""
     )
@@ -718,6 +1106,22 @@ def _copy_incoming_message(message: IncomingMessage, guard_result: GuardResult) 
 
 
 async def _resolve_user_language(message: IncomingMessage) -> str:
+    configured_language = str(message.metadata.get("configured_language") or "")
+    if _uses_inbox_language():
+        if configured_language:
+            conversation_languages[message.conversation_id] = configured_language
+            return configured_language
+
+        known_language = conversation_languages.get(message.conversation_id)
+        if known_language:
+            return known_language
+
+        return await _detect_and_cache_conversation_language(message.conversation_id, message.content)
+
+    if configured_language:
+        conversation_languages[message.conversation_id] = configured_language
+        return configured_language
+
     known_language = conversation_languages.get(message.conversation_id)
     if known_language:
         return known_language
@@ -727,23 +1131,30 @@ async def _resolve_user_language(message: IncomingMessage) -> str:
         conversation_languages[message.conversation_id] = guessed_language
         return guessed_language
 
-    if not settings.translation_outgoing_enabled:
+    if not (settings.translation_private_note_enabled or settings.translation_outgoing_enabled):
+        return ""
+
+    return await _detect_and_cache_conversation_language(message.conversation_id, message.content)
+
+
+async def _detect_and_cache_conversation_language(conversation_id: str, content: str) -> str:
+    if not content or not (settings.translation_private_note_enabled or settings.translation_outgoing_enabled):
         return ""
 
     try:
         detected_language = await asyncio.wait_for(
-            translator.detect_language(message.content),
+            translator.detect_language(content),
             timeout=settings.translation_timeout_seconds,
         )
     except TimeoutError:
-        logger.warning("Language detection timed out conversation_id=%s", message.conversation_id)
+        logger.warning("Language detection timed out conversation_id=%s", conversation_id)
         return ""
 
     if detected_language:
-        conversation_languages[message.conversation_id] = detected_language
+        conversation_languages[conversation_id] = detected_language
         logger.info(
             "Detected conversation language conversation_id=%s language=%s",
-            message.conversation_id,
+            conversation_id,
             detected_language,
         )
     return detected_language

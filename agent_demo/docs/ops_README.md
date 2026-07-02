@@ -353,6 +353,18 @@ CHATWOOT_DEFAULT_ASSIGNEE_ID=客服ID
 
 设置后，AI 判断需要转人工时，会自动分配给指定客服。
 
+转人工状态会写入 Chatwoot 会话自定义属性，避免服务重启后 AI 再次参与同一会话：
+
+```json
+{
+  "ai_handoff": true,
+  "ai_handoff_reason": "业务查询工具 API 尚未接入",
+  "ai_handoff_at": "2026-05-29T00:00:00+00:00"
+}
+```
+
+后续同一会话的用户公开消息仍会生成 `[AI translation]` 中文私有备注，方便客服查看，但不会再进入 Agent，也不会再发送 AI 公开回复。若需要手动恢复 AI，可在 Chatwoot 会话 custom attributes 中把 `ai_handoff` 改为 `false`。
+
 ### 5.5 后台同步配置
 
 ```env
@@ -398,9 +410,10 @@ PYGTRANS_PROXY=
 - `TRANSLATION_TARGET_LANG=zh-CN`：入站消息翻译目标语言，默认中文。
 - `TRANSLATION_SKIP_CHINESE=true`：用户消息包含中文时跳过翻译，避免重复。
 - `TRANSLATION_MIN_TEXT_LENGTH=2`：少于该长度的消息不翻译。
-- `TRANSLATION_OUTGOING_ENABLED`：是否把 AI 或客服的中文回复翻译成用户语言。
+- `TRANSLATION_OUTGOING_ENABLED`：是否把 AI 中文回复、客服中文私有备注翻译成用户语言。
 - `TRANSLATION_DEFAULT_USER_LANG`：服务重启后不知道用户语言时的默认兜底语言。
 - `TRANSLATION_TIMEOUT_SECONDS`：翻译超时时间。
+- `PUBLIC_REPLY_FALLBACK_LANGUAGE`：公开回复无法安全翻译时使用的兜底语言，选项为 `vi` 或 `en`；实际兜底语句维护在 `src/customer_agent/support_templates.py` 的 `PUBLIC_REPLY_FALLBACKS`。
 - `PYGTRANS_PROXY`：服务器访问 Google 翻译不稳定时使用代理。
 
 推荐配置：
@@ -413,13 +426,14 @@ TRANSLATION_SKIP_CHINESE=true
 TRANSLATION_OUTGOING_ENABLED=true
 TRANSLATION_DEFAULT_USER_LANG=
 TRANSLATION_TIMEOUT_SECONDS=8
+PUBLIC_REPLY_FALLBACK_LANGUAGE=vi
 PYGTRANS_PROXY=
 ```
 
 效果：
 
 - 用户发英文、日文、韩文等外语时，客服后台会收到中文私有备注。
-- AI 或客服用中文回复时，系统会尝试翻译成用户语言后发给用户。
+- AI 中文回复、客服中文私有备注会尝试翻译成用户语言后发给用户。
 - 用户发中文时不会重复生成中文翻译备注。
 
 如果绝大多数用户都是英文，可以设置：
@@ -763,7 +777,7 @@ curl http://127.0.0.1:9090/health
 - webhook 能触发。
 - 日志中出现 `Queued Agent processing`。
 - 如果开启翻译，能看到 `[AI translation]` 私有备注。
-- 如果开启出站翻译，中文回复能被翻译成用户语言。
+- 如果开启出站翻译，AI 中文回复或客服中文私有备注能被翻译成用户语言。
 
 ### 运营测试流程
 

@@ -4,7 +4,22 @@ from typing import Any
 
 from .clients import ChatwootGateway, LLMClient, RagStore
 from .config import Settings
+from .llm_response import sanitize_public_reply
 from .schemas import AgentAction, AgentResult, AgentState, IncomingMessage, Intent
+from .support_templates import PUBLIC_REPLY_FALLBACKS
+
+
+_PUBLIC_REPLY_FALLBACK = PUBLIC_REPLY_FALLBACKS["vi"]
+_UNMATCHED_FAQ_REPLY = (
+    "Câu hỏi bạn nhập hiện không khớp với menu câu hỏi thường gặp, "
+    "hiện tại trợ lý AI sẽ phục vụ bạn. Vui lòng mô tả chi tiết vấn đề của bạn, "
+    "tôi sẽ cố gắng hết sức để hỗ trợ bạn."
+)
+_HANDOFF_PUBLIC_REPLY = (
+    "Vấn đề này cần nhân viên hỗ trợ xác nhận thêm. "
+    "Tôi đã chuyển cho nhân viên hỗ trợ, vui lòng chờ trong giây lát."
+)
+AI_HANDOFF_NOTE_PREFIX = "[AI handoff note]"
 
 
 class CustomerSupportAgent:
@@ -26,8 +41,16 @@ class CustomerSupportAgent:
     async def send_private_note(self, conversation_id: str, content: str) -> None:
         await self._chatwoot.send_private_note(conversation_id, content)
 
+    async def update_conversation_custom_attributes(
+        self,
+        conversation_id: str,
+        custom_attributes: dict[str, Any],
+    ) -> None:
+        await self._chatwoot.update_conversation_custom_attributes(conversation_id, custom_attributes)
+
     async def send_public_reply(self, conversation_id: str, content: str) -> None:
-        await self._chatwoot.send_public_reply(conversation_id, content)
+        public_reply = sanitize_public_reply(content) or _PUBLIC_REPLY_FALLBACK
+        await self._chatwoot.send_public_reply(conversation_id, public_reply)
 
     async def send_interactive_message(
         self,
@@ -69,18 +92,27 @@ class CustomerSupportAgent:
     async def _intent_router(self, state: AgentState) -> AgentState:
         state.intent = await self._llm.classify_intent(state.message)
 
-        angry_markers = ("投诉", "垃圾", "差评", "生气", "骗人", "退款不到账")
-        if any(marker in state.message.content for marker in angry_markers):
+        angry_markers = (
+            "complaint",
+            "scam",
+            "fraud",
+            "refund",
+            "khiếu nại",
+            "lừa đảo",
+            "gian lận",
+            "hoàn tiền",
+        )
+        if any(marker in state.message.content.lower() for marker in angry_markers):
             state.intent = Intent.HUMAN_HANDOFF
             state.needs_human = True
-            state.handoff_reason = "检测到投诉或强负面情绪"
+            state.handoff_reason = "Detected complaint or high-risk negative sentiment"
 
         return state
 
     async def _execute_domain_node(self, state: AgentState) -> AgentState:
         if state.needs_human or state.intent == Intent.HUMAN_HANDOFF:
             state.needs_human = True
-            state.handoff_reason = state.handoff_reason or "用户明确要求人工客服"
+            state.handoff_reason = state.handoff_reason or "User explicitly requested human support"
             return state
 
         if state.intent in (Intent.FAQ, Intent.UNKNOWN):
@@ -90,16 +122,19 @@ class CustomerSupportAgent:
                 limit=self._settings.max_context_chunks,
             )
             state.confidence = state.retrieved_chunks[0].score if state.retrieved_chunks else 0.0
-            state.draft_reply = await self._llm.generate_answer(state.message, state.retrieved_chunks)
+            state.draft_reply = (
+                sanitize_public_reply(await self._llm.generate_answer(state.message, state.retrieved_chunks))
+                or _PUBLIC_REPLY_FALLBACK
+            )
             return state
 
         if state.intent == Intent.BUSINESS:
             state.needs_human = True
-            state.handoff_reason = "业务查询工具 API 尚未接入"
+            state.handoff_reason = "Business query API is not connected"
             return state
 
         state.confidence = 0.72
-        state.draft_reply = "你好，我是 AI 助手。你可以直接告诉我遇到的问题，我会先帮你查资料。"
+        state.draft_reply = _UNMATCHED_FAQ_REPLY
         return state
 
     async def _confidence_guard(self, state: AgentState) -> AgentState:
@@ -108,17 +143,18 @@ class CustomerSupportAgent:
 
         if state.intent in (Intent.FAQ, Intent.UNKNOWN) and state.confidence < self._settings.rag_min_confidence:
             state.needs_human = True
-            state.handoff_reason = f"知识库召回置信度过低：{state.confidence:.2f}"
+            state.handoff_reason = f"Knowledge base confidence is too low: {state.confidence:.2f}"
 
         return state
 
     async def _finalize_action(self, state: AgentState, send_public_reply: bool = True) -> AgentState:
         if state.needs_human:
-            state.private_note = await self._llm.summarize_handoff(state.message, state.handoff_reason)
-            state.draft_reply = state.draft_reply or "这个问题需要人工客服进一步确认，我已经帮你转接。"
+            handoff_summary = await self._llm.summarize_handoff(state.message, state.handoff_reason)
+            state.private_note = f"{AI_HANDOFF_NOTE_PREFIX}\n{handoff_summary}"
+            state.draft_reply = state.draft_reply or _HANDOFF_PUBLIC_REPLY
             await self._chatwoot.handoff_to_human(state.message.conversation_id, state.private_note)
             return state
 
         if send_public_reply:
-            await self._chatwoot.send_public_reply(state.message.conversation_id, state.draft_reply)
+            await self.send_public_reply(state.message.conversation_id, state.draft_reply)
         return state

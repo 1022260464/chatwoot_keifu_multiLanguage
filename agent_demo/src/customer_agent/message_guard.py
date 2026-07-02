@@ -28,7 +28,7 @@ class GuardResult:
 
 
 def inspect_message(content: str, language: str = "") -> GuardResult:
-    normalized_language = normalize_faq_language(language) or "zh"
+    normalized_language = normalize_faq_language(language) or "vi"
     normalized_content = content.strip()
 
     if _is_low_value_message(normalized_content, normalized_language):
@@ -46,9 +46,9 @@ def inspect_message(content: str, language: str = "") -> GuardResult:
             reason=f"sensitive_keyword:{sensitive_keyword}",
             reply=_localized(SENSITIVE_PUBLIC_REPLIES, normalized_language),
             private_note=(
-                "消息命中敏感/高风险关键词，建议人工优先处理。\n"
-                f"命中词：{sensitive_keyword}\n"
-                f"用户原文：{normalized_content}"
+                "Message matched a sensitive or high-risk keyword. Human review is recommended.\n"
+                f"Matched keyword: {sensitive_keyword}\n"
+                f"Original user message: {normalized_content}"
             ),
             sanitized_content=mask_private_info(normalized_content),
         )
@@ -59,8 +59,8 @@ def inspect_message(content: str, language: str = "") -> GuardResult:
             action="continue",
             reason=f"privacy_masked:{','.join(matched_labels)}",
             private_note=(
-                f"{PRIVACY_PRIVATE_NOTE_PREFIX}。\n"
-                f"字段类型：{', '.join(matched_labels)}"
+                f"{PRIVACY_PRIVATE_NOTE_PREFIX}.\n"
+                f"Field types: {', '.join(matched_labels)}"
             ),
             sanitized_content=sanitized_content,
         )
@@ -94,6 +94,7 @@ def _is_low_value_message(content: str, language: str) -> bool:
 
     low_value_messages = set(LOW_VALUE_MESSAGES.get(language, set()))
     low_value_messages.update(LOW_VALUE_MESSAGES.get("en", set()))
+    low_value_messages.update(LOW_VALUE_MESSAGES.get("zh", set()))
     if lowered in low_value_messages:
         return True
 
@@ -109,8 +110,7 @@ def _is_low_value_message(content: str, language: str) -> bool:
 def _find_sensitive_keyword(content: str, language: str) -> str:
     lowered = content.lower()
     keyword_sets = [SENSITIVE_KEYWORDS.get(language, set()), SENSITIVE_KEYWORDS.get("en", set())]
-    if language != "zh":
-        keyword_sets.append(SENSITIVE_KEYWORDS.get("zh", set()))
+    keyword_sets.append(SENSITIVE_KEYWORDS.get("zh", set()))
 
     for keywords in keyword_sets:
         for keyword in keywords:
@@ -120,4 +120,4 @@ def _find_sensitive_keyword(content: str, language: str) -> str:
 
 
 def _localized(values: dict[str, str], language: str) -> str:
-    return values.get(language) or values["zh"]
+    return values.get(language) or values["vi"]

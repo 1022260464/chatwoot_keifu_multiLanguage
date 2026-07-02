@@ -1,0 +1,16 @@
+[Unit]
+Description=GlitchTip to WeCom webhook forwarder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zhiying
+WorkingDirectory=/home/data/GlitchTip
+Environment=WECOM_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=0cab60e3-dead-49c2-b4ae-c087981369d6
+ExecStart=/home/data/miniconda3/bin/python -m gunicorn -w 2 -b 0.0.0.0:5000 main:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
