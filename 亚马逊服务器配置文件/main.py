@@ -12,7 +12,7 @@ app = Flask(__name__)
 # 企业微信机器人 Webhook 地址。生产环境建议用环境变量覆盖，避免把 key 写死在代码里。
 WECOM_WEBHOOK_URL = os.getenv(
     "WECOM_WEBHOOK_URL",
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=0cab60e3-dead-49c2-b4ae-c087981369d6",
+    "",
 )
 
 
